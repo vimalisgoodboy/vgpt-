@@ -180,25 +180,48 @@ class ModelManager:
         'report': ['llama3.1:8b', 'wizardlm2:7b', 'phi3:14b'],
         'exploit': ['dolphin-llama3:8b', 'wizardlm2:7b', 'qwen2.5-coder:7b', 'codellama:7b', 'deepseek-coder:6.7b'],
         'privesc': ['dolphin-llama3:8b', 'deepseek-coder:6.7b', 'codellama:7b', 'qwen2.5-coder:7b'],
-        'osint': ['wizardlm2:7b', 'qwen2.5:7b', 'llama3.2:3b']
+        'osint': ['wizardlm2:7b', 'qwen2.5:7b', 'llama3.2:3b'],
+        'chat': ['wizardlm2:7b', 'qwen2.5:7b', 'dolphin-llama3:8b']
     }
 
     def __init__(self):
         self.active_models = list(self.MODELS)
+        self.ollama_exe = self._find_ollama_executable()
         self.ollama_models = self._discover_ollama_models()
         self.available_models = set(self.ollama_models)
 
+    def _find_ollama_executable(self) -> Optional[str]:
+        candidates = [shutil.which('ollama')]
+        candidates += [
+            os.path.expanduser('~/.local/bin/ollama'),
+            os.path.expanduser('~/bin/ollama'),
+            '/usr/local/bin/ollama',
+            '/usr/bin/ollama'
+        ]
+        for path in candidates:
+            if path and os.path.isfile(path) and os.access(path, os.X_OK):
+                return path
+        return None
+
     def _discover_ollama_models(self) -> List[str]:
-        if not shutil.which('ollama'):
+        if not self.ollama_exe:
             return []
+        models = []
         try:
-            output = subprocess.check_output(['ollama', 'list', '--json'], text=True, stderr=subprocess.DEVNULL)
-            models = json.loads(output)
-            if isinstance(models, list):
-                return [m.get('name') if isinstance(m, dict) else str(m) for m in models if m]
+            output = subprocess.check_output([self.ollama_exe, 'list', '--json'], text=True, stderr=subprocess.DEVNULL)
+            parsed = json.loads(output)
+            if isinstance(parsed, list):
+                models = [m.get('name') if isinstance(m, dict) else str(m) for m in parsed if m]
         except Exception:
-            pass
-        return []
+            try:
+                output = subprocess.check_output([self.ollama_exe, 'list'], text=True, stderr=subprocess.DEVNULL)
+                for line in output.splitlines():
+                    name = line.strip().split()[0] if line.strip() else ''
+                    if name and ':' in name:
+                        models.append(name)
+            except Exception:
+                pass
+        return list(dict.fromkeys(models))
 
     def select_model(self, mode: str, domain: Optional[str] = None) -> str:
         if self.ollama_models:
@@ -303,6 +326,68 @@ class OllamaFusion:
 
 model_manager = ModelManager()
 fusion_engine = OllamaFusion()
+
+# ========================================
+# CHATBOT & DARK WEB SEARCH FEATURES
+# ========================================
+class ChatEngine:
+    def __init__(self, model_manager: ModelManager):
+        self.model_manager = model_manager
+
+    def ask(self, prompt: str, mode: str = 'chat') -> str:
+        model = self.model_manager.select_model(mode, 'chat')
+        if self.model_manager.ollama_exe:
+            try:
+                completed = subprocess.run(
+                    [self.model_manager.ollama_exe, 'run', model, prompt],
+                    capture_output=True,
+                    text=True,
+                    timeout=60
+                )
+                return completed.stdout.strip() or completed.stderr.strip() or f"[ollama:{model}] no response"
+            except Exception as exc:
+                return f"Chat failed: {exc}"
+        return f"[fallback:{model}] {prompt}"
+
+class DarkWebSearch:
+    SEARCH_URL = 'https://html.duckduckgo.com/html'
+    LEAK_INDICATORS = ['leak', 'breach', 'pastebin', 'paste', 'dump', 'leaked', 'password', 'credentials', 'database', 'compromised']
+
+    def search(self, query: str) -> List[Dict[str, str]]:
+        if not query:
+            return []
+        search_query = f"{query} leaked" if '@' in query else f"{query} leak"
+        try:
+            resp = requests.get(self.SEARCH_URL, params={'q': search_query}, timeout=12, verify=False)
+            html = resp.text
+            return self._parse_results(html, query)
+        except Exception:
+            return []
+
+    def _parse_results(self, html: str, query: str) -> List[Dict[str, str]]:
+        results = []
+        for match in re.finditer(r'<a[^>]+href="(https?://[^"]+)"[^>]*>([^<]+)</a>', html):
+            url = match.group(1)
+            title = re.sub(r'<.*?>', '', match.group(2)).strip()
+            snippet = self._extract_snippet(html, url)
+            leak_score = sum(term in snippet.lower() for term in self.LEAK_INDICATORS)
+            if leak_score > 0 or ('@' in query and query.lower() in snippet.lower()):
+                results.append({
+                    'site': url,
+                    'title': title,
+                    'snippet': snippet.strip()[:280]
+                })
+            if len(results) >= 8:
+                break
+        return results
+
+    def _extract_snippet(self, html: str, url: str) -> str:
+        pattern = re.escape(url)
+        match = re.search(rf'(.{{0,220}}{pattern}.{{0,220}})', html)
+        return match.group(1) if match else ''
+
+chat_engine = ChatEngine(model_manager)
+dark_web_search = DarkWebSearch()
 
 # ========================================
 # PERSISTENT DATABASE SYSTEM
@@ -1007,10 +1092,6 @@ class RedTeamOrchestrator:
         console.print("[bold cyan]📈 STAGE 8: REPORT GENERATION[/bold cyan]")
         reports.generate_full_report(target)
 
-        # 7. REPORT
-        console.print("[bold cyan]📈 STAGE 8: REPORT GENERATION[/bold cyan]")
-        reports.generate_full_report(target)
-
         # 8. MONITOR
         console.print("[bold cyan]👁️  STAGE 9: MONITORING STARTED[/bold cyan]")
         self._monitor(target)
@@ -1047,7 +1128,9 @@ def show_main_menu():
     menu.add_row("[bold cyan]C[/bold cyan]", "Web scan")
     menu.add_row("[bold cyan]D[/bold cyan]", "Exploit payloads")
     menu.add_row("[bold cyan]E[/bold cyan]", "Generate report")
-    menu.add_row("[bold cyan]H[/bold cyan]", "Launch vulnerability dashboard")
+    menu.add_row("[bold cyan]G[/bold cyan]", "Chatbot (general ChatGPT-like)")
+    menu.add_row("[bold cyan]H[/bold cyan]", "Dark web leak search")
+    menu.add_row("[bold cyan]I[/bold cyan]", "Launch vulnerability dashboard")
     menu.add_row("[bold cyan]M[/bold cyan]", "Set execution mode")
     menu.add_row("[bold cyan]P[/bold cyan]", "Set persona")
     menu.add_row("[bold cyan]Q[/bold cyan]", "Quit")
@@ -1066,9 +1149,13 @@ def parse_command(cmd: str) -> Dict[str, str]:
         return {'action': 'exploit'}
     if 'report' in cmd_lower:
         return {'action': 'report'}
-    if 'dashboard' in cmd_lower or cmd_lower.strip() == 'h':
+    if 'chat' in cmd_lower:
+        return {'action': 'chat'}
+    if 'dark' in cmd_lower or 'leak' in cmd_lower or 'breach' in cmd_lower:
+        return {'action': 'darkweb'}
+    if 'dashboard' in cmd_lower or cmd_lower.strip() == 'i':
         return {'action': 'dashboard'}
-    if cmd_lower.strip() in ['a', 'b', 'c', 'd', 'e', 'm', 'p', 'q', 'h']:
+    if cmd_lower.strip() in ['a', 'b', 'c', 'd', 'e', 'g', 'h', 'i', 'm', 'p', 'q']:
         return {'action': cmd_lower.strip()}
     return {'action': 'unknown'}
 
@@ -1140,7 +1227,27 @@ def cli_interface():
                 else:
                     console.print("[yellow]Report target required.[/yellow]")
 
-            elif action['action'] in ['h', 'dashboard']:
+            elif action['action'] in ['g', 'chat']:
+                question = Prompt.ask("Ask the chatbot a question", console=console)
+                if question:
+                    answer = chat_engine.ask(question, 'chat')
+                    console.print(Panel.fit(answer, title="ChatGPT-style Assistant", border_style="green"))
+                else:
+                    console.print("[yellow]Question required.[/yellow]")
+
+            elif action['action'] in ['h', 'darkweb']:
+                leak_query = Prompt.ask("Enter email address or keyword to search for leaked data", console=console)
+                if leak_query:
+                    results = dark_web_search.search(leak_query)
+                    if results:
+                        for item in results:
+                            console.print(Panel.fit(f"Source: {item['site']}\n{item['snippet']}", title=item['title'], border_style="red"))
+                    else:
+                        console.print("[yellow]No leak-related results were found for that query.[/yellow]")
+                else:
+                    console.print("[yellow]Search query required.[/yellow]")
+
+            elif action['action'] in ['i', 'dashboard']:
                 start_dashboard()
 
             elif action['action'] in ['m']:
