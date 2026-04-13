@@ -198,7 +198,7 @@ class ModelManager:
         'exploit': ['dolphin-llama3:8b', 'wizardlm2:7b', 'qwen2.5-coder:7b', 'codellama:7b', 'deepseek-coder:6.7b'],
         'privesc': ['dolphin-llama3:8b', 'deepseek-coder:6.7b', 'codellama:7b', 'qwen2.5-coder:7b'],
         'osint': ['wizardlm2:7b', 'qwen2.5:7b', 'llama3.2:3b'],
-        'chat': ['phi3:mini', 'gemma2:2b', 'qwen2.5:7b', 'wizardlm2:7b', 'dolphin-llama3:8b']
+        'chat': ['qwen2.5:7b', 'wizardlm2:7b', 'dolphin-llama3:8b', 'phi3:mini', 'gemma2:2b']
     }
 
     def __init__(self):
@@ -358,23 +358,26 @@ class ChatEngine:
         if cleaned in self.GREETINGS:
             return "Hello! How can I assist you today?"
 
-        model = self.model_manager.select_model(mode, 'chat')
         if self.model_manager.ollama_exe:
-            try:
-                completed = subprocess.run(
-                    [self.model_manager.ollama_exe, 'run', model, prompt],
-                    capture_output=True,
-                    text=True,
-                    timeout=12
-                )
-                output = completed.stdout.strip() or completed.stderr.strip()
-                if output:
-                    return output
-                return f"[ollama:{model}] model responded with no text"
-            except subprocess.TimeoutExpired:
-                return f"Chat response timed out after 12 seconds using {model}."
-            except Exception as exc:
-                return f"Chat failed: {exc}"
+            chat_models = [m for m in self.model_manager.PHASE_MODEL_PREFERENCE.get('chat', []) if m in self.model_manager.available_models]
+            for model in chat_models[:3]:
+                try:
+                    completed = subprocess.run(
+                        [self.model_manager.ollama_exe, 'run', model, prompt],
+                        capture_output=True,
+                        text=True,
+                        timeout=30
+                    )
+                    output = completed.stdout.strip() or completed.stderr.strip()
+                    if output:
+                        return output
+                except subprocess.TimeoutExpired:
+                    continue
+                except Exception:
+                    continue
+            return f"Chat response failed on available chat models: {', '.join(chat_models[:3])}."
+
+        model = self.model_manager.select_model(mode, 'chat')
         return f"[fallback:{model}] {prompt}"
 
 class DarkWebSearch:
@@ -399,7 +402,9 @@ class DarkWebSearch:
         return [{
             'site': 'no-results',
             'title': 'No leak-related results found',
-            'snippet': 'The search engine parser did not return any useful leak data. Try a different keyword or verify network access.'
+            'snippet': 'The search engine parser did not return any useful leak data. Try a different keyword or verify network access.',
+            'leak_summary': 'Unable to identify leaked details from search results.',
+            'leaked_attributes': ''
         }]
 
     def _parse_results(self, html: str, query: str) -> List[Dict[str, str]]:
@@ -416,14 +421,44 @@ class DarkWebSearch:
             snippet = self._extract_snippet(html, url)
             leak_score = sum(term in snippet.lower() for term in self.LEAK_INDICATORS)
             if leak_score > 0 or ('@' in query and query.lower() in snippet.lower()) or len(results) < 4:
+                leaked_attributes = self._extract_leaked_attributes(snippet)
+                leak_summary = self._extract_leak_summary(title, snippet, query, leaked_attributes)
                 results.append({
                     'site': url,
                     'title': title,
-                    'snippet': (snippet or title).strip()[:280]
+                    'snippet': (snippet or title).strip()[:280],
+                    'leak_summary': leak_summary,
+                    'leaked_attributes': leaked_attributes
                 })
             if len(results) >= 8:
                 break
         return results
+
+    def _extract_leak_summary(self, title: str, snippet: str, query: str, leaked_attributes: str) -> str:
+        text = f"{title} {snippet}".lower()
+        if 'compromised data' in text or 'compromised' in text:
+            return 'This result indicates compromised data exposure.'
+        if 'breach' in text or 'leak' in text or 'exposed' in text:
+            summary = 'Leaked data mentioned in search result.'
+            if leaked_attributes:
+                summary += f' Likely leaked fields: {leaked_attributes}.'
+            return summary
+        if leaked_attributes:
+            return f'Potential leaked fields: {leaked_attributes}.'
+        return 'Leak-related search result found.'
+
+    def _extract_leaked_attributes(self, text: str) -> str:
+        categories = [
+            'email address', 'email addresses', 'password', 'passwords', 'username', 'usernames',
+            'phone number', 'phone numbers', 'credit card', 'credit cards', 'ip address', 'ip addresses',
+            'social security', 'ssn', 'date of birth', 'dob', 'name', 'names', 'address', 'addresses'
+        ]
+        found = []
+        lowered = text.lower()
+        for category in categories:
+            if category in lowered and category not in found:
+                found.append(category)
+        return ', '.join(found)
 
     def _extract_snippet(self, html: str, url: str) -> str:
         pos = html.find(url)
@@ -1277,12 +1312,16 @@ def cli_interface():
                     console.print("[yellow]Report target required.[/yellow]")
 
             elif action['action'] in ['g', 'chat']:
-                question = Prompt.ask("Ask the chatbot a question", console=console)
-                if question:
+                console.print("[green]Entering ChatGPT-style session. Type 'exit', 'quit', or 'back' to return.[/green]")
+                while True:
+                    question = Prompt.ask("[bold red]V-chat>[/bold red]", console=console)
+                    if question.strip().lower() in ['exit', 'quit', 'back']:
+                        console.print("[green]Chat session ended.[/green]")
+                        break
+                    if not question.strip():
+                        continue
                     answer = chat_engine.ask(question, 'chat')
                     console.print(Panel.fit(answer, title="ChatGPT-style Assistant", border_style="green"))
-                else:
-                    console.print("[yellow]Question required.[/yellow]")
 
             elif action['action'] in ['h', 'darkweb']:
                 leak_query = Prompt.ask("Enter email address or keyword to search for leaked data", console=console)
@@ -1290,7 +1329,15 @@ def cli_interface():
                     results = dark_web_search.search(leak_query)
                     if results:
                         for item in results:
-                            console.print(Panel.fit(f"Source: {item['site']}\n{item['snippet']}", title=item['title'], border_style="red"))
+                            summary = item.get('leak_summary', '')
+                            attributes = item.get('leaked_attributes', '')
+                            details = f"Source: {item['site']}\n"
+                            if summary:
+                                details += f"Summary: {summary}\n"
+                            if attributes:
+                                details += f"Leaked info: {attributes}\n"
+                            details += f"\n{item['snippet']}"
+                            console.print(Panel.fit(details, title=item['title'], border_style="red"))
                     else:
                         console.print("[yellow]No leak-related results were found for that query.[/yellow]")
                 else:
