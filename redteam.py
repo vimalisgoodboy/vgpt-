@@ -181,7 +181,7 @@ class ModelManager:
         'exploit': ['dolphin-llama3:8b', 'wizardlm2:7b', 'qwen2.5-coder:7b', 'codellama:7b', 'deepseek-coder:6.7b'],
         'privesc': ['dolphin-llama3:8b', 'deepseek-coder:6.7b', 'codellama:7b', 'qwen2.5-coder:7b'],
         'osint': ['wizardlm2:7b', 'qwen2.5:7b', 'llama3.2:3b'],
-        'chat': ['wizardlm2:7b', 'qwen2.5:7b', 'dolphin-llama3:8b']
+        'chat': ['phi3:mini', 'gemma2:2b', 'qwen2.5:7b', 'wizardlm2:7b', 'dolphin-llama3:8b']
     }
 
     def __init__(self):
@@ -331,10 +331,16 @@ fusion_engine = OllamaFusion()
 # CHATBOT & DARK WEB SEARCH FEATURES
 # ========================================
 class ChatEngine:
+    GREETINGS = {'hi', 'hello', 'hey', 'hey there', 'good morning', 'good afternoon', 'good evening'}
+
     def __init__(self, model_manager: ModelManager):
         self.model_manager = model_manager
 
     def ask(self, prompt: str, mode: str = 'chat') -> str:
+        cleaned = prompt.strip().lower()
+        if cleaned in self.GREETINGS:
+            return "Hello! How can I assist you today?"
+
         model = self.model_manager.select_model(mode, 'chat')
         if self.model_manager.ollama_exe:
             try:
@@ -342,49 +348,73 @@ class ChatEngine:
                     [self.model_manager.ollama_exe, 'run', model, prompt],
                     capture_output=True,
                     text=True,
-                    timeout=60
+                    timeout=12
                 )
-                return completed.stdout.strip() or completed.stderr.strip() or f"[ollama:{model}] no response"
+                output = completed.stdout.strip() or completed.stderr.strip()
+                if output:
+                    return output
+                return f"[ollama:{model}] model responded with no text"
+            except subprocess.TimeoutExpired:
+                return f"Chat response timed out after 12 seconds using {model}."
             except Exception as exc:
                 return f"Chat failed: {exc}"
         return f"[fallback:{model}] {prompt}"
 
 class DarkWebSearch:
-    SEARCH_URL = 'https://html.duckduckgo.com/html'
+    SEARCH_URL = 'https://search.brave.com/search'
+    USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
     LEAK_INDICATORS = ['leak', 'breach', 'pastebin', 'paste', 'dump', 'leaked', 'password', 'credentials', 'database', 'compromised']
+    EXCLUDED_DOMAINS = ['brave.com', 'duckduckgo.com', 'google.com', 'bing.com', 'yahoo.com', 'facebook.com', 'twitter.com', 'instagram.com', 'youtube.com']
 
     def search(self, query: str) -> List[Dict[str, str]]:
         if not query:
             return []
         search_query = f"{query} leaked" if '@' in query else f"{query} leak"
         try:
-            resp = requests.get(self.SEARCH_URL, params={'q': search_query}, timeout=12, verify=False)
+            headers = {'User-Agent': self.USER_AGENT}
+            resp = requests.get(self.SEARCH_URL, params={'q': search_query}, timeout=10, headers=headers, verify=False)
             html = resp.text
-            return self._parse_results(html, query)
+            results = self._parse_results(html, query)
+            if results:
+                return results
         except Exception:
-            return []
+            pass
+        return [{
+            'site': 'no-results',
+            'title': 'No leak-related results found',
+            'snippet': 'The search engine parser did not return any useful leak data. Try a different keyword or verify network access.'
+        }]
 
     def _parse_results(self, html: str, query: str) -> List[Dict[str, str]]:
         results = []
-        for match in re.finditer(r'<a[^>]+href="(https?://[^"]+)"[^>]*>([^<]+)</a>', html):
+        seen = set()
+        for match in re.finditer(r'<a[^>]+href="(https?://[^"]+)"[^>]*>(.*?)</a>', html, re.S):
             url = match.group(1)
             title = re.sub(r'<.*?>', '', match.group(2)).strip()
+            if not title or any(domain in url for domain in self.EXCLUDED_DOMAINS):
+                continue
+            if url in seen:
+                continue
+            seen.add(url)
             snippet = self._extract_snippet(html, url)
             leak_score = sum(term in snippet.lower() for term in self.LEAK_INDICATORS)
-            if leak_score > 0 or ('@' in query and query.lower() in snippet.lower()):
+            if leak_score > 0 or ('@' in query and query.lower() in snippet.lower()) or len(results) < 4:
                 results.append({
                     'site': url,
                     'title': title,
-                    'snippet': snippet.strip()[:280]
+                    'snippet': (snippet or title).strip()[:280]
                 })
             if len(results) >= 8:
                 break
         return results
 
     def _extract_snippet(self, html: str, url: str) -> str:
-        pattern = re.escape(url)
-        match = re.search(rf'(.{{0,220}}{pattern}.{{0,220}})', html)
-        return match.group(1) if match else ''
+        pos = html.find(url)
+        if pos == -1:
+            return ''
+        snippet = html[max(0, pos - 220):pos + len(url) + 220]
+        snippet = re.sub(r'<.*?>', ' ', snippet)
+        return re.sub(r'\s+', ' ', snippet).strip()
 
 chat_engine = ChatEngine(model_manager)
 dark_web_search = DarkWebSearch()
