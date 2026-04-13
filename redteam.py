@@ -753,10 +753,19 @@ class RedTeamOrchestrator:
         console.print(Panel(f"[bold green]🚀 REDTEAM PIPELINE STARTING: {target}[/bold green]",
                            border_style="red"))
         pipeline_model = model_manager.select_model(self.mode, 'pipeline')
+        recon_model = model_manager.select_model(self.mode, 'recon')
+        intel_model = model_manager.select_model(self.mode, 'intelligence')
+        scan_model = model_manager.select_model(self.mode, 'scan')
+        analysis_model = model_manager.select_model(self.mode, 'analysis')
+        validation_model = model_manager.select_model(self.mode, 'validation')
+        prioritize_model = model_manager.select_model(self.mode, 'prioritize')
+        report_model = model_manager.select_model(self.mode, 'report')
+        exploit_model = model_manager.select_model(self.mode, 'exploit')
+
         console.print(f"[cyan]Persona:[/cyan] {self.persona} | [cyan]Primary model:[/cyan] {pipeline_model}")
+        console.print(f"[cyan]Selected models:[/cyan] recon={recon_model}, intel={intel_model}, scan={scan_model}, analysis={analysis_model}, validation={validation_model}, prioritize={prioritize_model}, report={report_model}, exploit={exploit_model}")
 
         # 1. RECON
-        recon_model = model_manager.select_model(self.mode, 'recon')
         console.print(f"[cyan]Recon model:[/cyan] {recon_model}")
         console.print("[bold cyan]🔍 STAGE 1: RECONNAISSANCE[/bold cyan]")
         recon_results = recon.full_recon(target)
@@ -764,12 +773,12 @@ class RedTeamOrchestrator:
                       f"Found {len(recon_results['ports'])} ports, {len(recon_results['subdomains'])} subdomains", '', '', 0.0, 0.8)
 
         # 2. INTELLIGENCE
+        console.print(f"[cyan]Intelligence model:[/cyan] {intel_model}")
         console.print("[bold cyan]🧠 STAGE 2: INTELLIGENCE GATHERING[/bold cyan]")
         intel = self._gather_intelligence(target)
         db.add_finding(target, 'intelligence', 'info', 'Intelligence Complete', str(intel), '', '', 0.0, 0.85)
 
         # 3. SCAN
-        scan_model = model_manager.select_model(self.mode, 'scan')
         console.print(f"[cyan]Scan model:[/cyan] {scan_model}")
         console.print("[bold cyan]🔎 STAGE 3: VULNERABILITY SCAN[/bold cyan]")
         vuln_findings = vuln_engine.scan_web(target)
@@ -784,22 +793,29 @@ class RedTeamOrchestrator:
         console.print(f"[green]Fused vuln output ({vuln_phase['confidence']:.2f}):[/green] {vuln_phase['fused_output'][:200]}...")
 
         # 4. ANALYSIS & VALIDATION
-        analysis_model = model_manager.select_model(self.mode, 'analysis')
         console.print(f"[cyan]Analysis model:[/cyan] {analysis_model}")
+        console.print(f"[cyan]Validation model:[/cyan] {validation_model}")
         console.print("[bold cyan]📊 STAGE 4-5: ANALYSIS + VALIDATION[/bold cyan]")
         prioritized = prioritizer.score_findings(vuln_findings)
 
         # 5. PRIORITIZE
+        console.print(f"[cyan]Prioritization model:[/cyan] {prioritize_model}")
         console.print("[bold cyan]🎯 STAGE 6: PRIORITIZATION[/bold cyan]")
         for finding in prioritized[:5]:
             console.print(f"[red]HIGH PRIORITY: {finding.get('title')} (CVSS {finding.get('cvss'):.1f})[/red]")
 
         # 6. EXPLOIT GENERATION
+        console.print(f"[cyan]Exploit model:[/cyan] {exploit_model}")
         console.print("[bold cyan]💣 STAGE 7: EXPLOIT GENERATION[/bold cyan]")
         shells = exploits.generate_reverse_shells("10.11.11.11")
         console.print("[yellow]Reverse shells ready:[/yellow]")
         for lang, payload in shells.items():
             console.print(f"  {lang}: {payload[:80]}...")
+
+        # 7. REPORT
+        console.print(f"[cyan]Report model:[/cyan] {report_model}")
+        console.print("[bold cyan]📈 STAGE 8: REPORT GENERATION[/bold cyan]")
+        reports.generate_full_report(target)
 
         # 7. REPORT
         console.print("[bold cyan]📈 STAGE 8: REPORT GENERATION[/bold cyan]")
