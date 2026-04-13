@@ -60,6 +60,16 @@ class RedTeamConfig:
         'redteam': 'Full kill chain',
         'autonomous': 'AI-driven full workflow'
     }
+    MODE_SHORT = {
+        'aggressive': 'AGG',
+        'stealth': 'STL',
+        'fast': 'FST',
+        'detailed': 'DTL',
+        'recon': 'RCN',
+        'exploit': 'EXP',
+        'redteam': 'RTM',
+        'autonomous': 'AUT'
+    }
     
     PERSONAS = {
         'kali_fast': 'Fast recon/scanning',
@@ -67,6 +77,13 @@ class RedTeamConfig:
         '0day_coder': 'Exploit development',
         'dark_gpt': 'Advanced red teaming',
         'onion_gpt': 'Dark web/OSINT'
+    }
+    PERSONA_SHORT = {
+        'kali_fast': 'KF',
+        'kali_thinking': 'KT',
+        '0day_coder': '0D',
+        'dark_gpt': 'DG',
+        'onion_gpt': 'OG'
     }
     
     PIPELINE_STAGES = [
@@ -1196,15 +1213,17 @@ def extract_target(cmd: str) -> Optional[str]:
 
 
 def cli_interface():
-    console.print(Panel.fit("[bold red]HackerAI Red Team[/bold red]\n"
-                           "[green]Fully Autonomous Penetration Testing Pipeline[/green]\n"
-                           "[yellow]Pipeline: Recon→Intel→Scan→Analysis→Validation→Prioritize→Report→Monitor→Learn[/yellow]",
-                           title="🚀", border_style="blue"))
+    mode_short = config.MODE_SHORT.get(orchestrator.mode, orchestrator.mode.upper())
+    persona_short = config.PERSONA_SHORT.get(orchestrator.persona, orchestrator.persona.upper())
+    console.print(Panel.fit("[bold red]V[/bold red]\n"
+                           f"[green]Fully Autonomous Pentesting Pipeline[/green]\n"
+                           f"[yellow]Mode: [bold green]{mode_short}[/bold green] | Persona: [bold cyan]{persona_short}[/bold cyan] >[/yellow]",
+                           title="🚀 V", border_style="blue"))
 
     while True:
         try:
             show_main_menu()
-            cmd = Prompt.ask("\n[bold red]redteam> [/bold red]", console=console)
+            cmd = Prompt.ask("\n[bold red]V> [/bold red]", console=console)
             action = parse_command(cmd)
             target = extract_target(cmd)
 
