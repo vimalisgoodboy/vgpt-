@@ -198,7 +198,7 @@ class ModelManager:
         'exploit': ['dolphin-llama3:8b', 'wizardlm2:7b', 'qwen2.5-coder:7b', 'codellama:7b', 'deepseek-coder:6.7b'],
         'privesc': ['dolphin-llama3:8b', 'deepseek-coder:6.7b', 'codellama:7b', 'qwen2.5-coder:7b'],
         'osint': ['wizardlm2:7b', 'qwen2.5:7b', 'llama3.2:3b'],
-        'chat': ['qwen2.5:7b', 'wizardlm2:7b', 'dolphin-llama3:8b', 'phi3:mini', 'gemma2:2b']
+        'chat': ['phi3:mini', 'gemma2:2b', 'qwen2.5:7b', 'wizardlm2:7b', 'dolphin-llama3:8b']
     }
 
     def __init__(self):
@@ -348,25 +348,42 @@ fusion_engine = OllamaFusion()
 # CHATBOT & DARK WEB SEARCH FEATURES
 # ========================================
 class ChatEngine:
-    GREETINGS = {'hi', 'hello', 'hey', 'hey there', 'good morning', 'good afternoon', 'good evening'}
+    GREETINGS = {'hi', 'hello', 'hey', 'hey there'}
 
     def __init__(self, model_manager: ModelManager):
         self.model_manager = model_manager
 
+    MAX_CHAT_TIMEOUT = 5
+
     def ask(self, prompt: str, mode: str = 'chat') -> str:
-        cleaned = prompt.strip().lower()
-        if cleaned in self.GREETINGS:
+        cleaned = prompt.strip()
+        if not cleaned:
+            return "Please type a question or request."
+
+        if cleaned.lower() in self.GREETINGS:
             return "Hello! How can I assist you today?"
 
         if self.model_manager.ollama_exe:
-            chat_models = [m for m in self.model_manager.PHASE_MODEL_PREFERENCE.get('chat', []) if m in self.model_manager.available_models]
-            for model in chat_models[:3]:
+            preferred = self.model_manager.PHASE_MODEL_PREFERENCE.get('chat', [])
+            chat_models = [m for m in preferred if m in self.model_manager.available_models]
+            if not chat_models:
+                available = ', '.join(sorted(self.model_manager.available_models)) or 'none'
+                return f"No installed Ollama chat model available. Installed models: {available}. Install phi3:mini or gemma2:2b for faster natural chat."
+
+            system_prompt = (
+                "You are a helpful AI assistant. Answer the user's question directly in natural, conversational language. "
+                "Do not add meta commentary about the model or runtime."
+            )
+            user_prompt = f"User: {cleaned}\nAssistant:"
+            full_prompt = f"{system_prompt}\n\n{user_prompt}"
+
+            for model in chat_models[:2]:
                 try:
                     completed = subprocess.run(
-                        [self.model_manager.ollama_exe, 'run', model, prompt],
+                        [self.model_manager.ollama_exe, 'run', model, full_prompt],
                         capture_output=True,
                         text=True,
-                        timeout=30
+                        timeout=self.MAX_CHAT_TIMEOUT
                     )
                     output = completed.stdout.strip() or completed.stderr.strip()
                     if output:
@@ -375,10 +392,12 @@ class ChatEngine:
                     continue
                 except Exception:
                     continue
-            return f"Chat response failed on available chat models: {', '.join(chat_models[:3])}."
+
+            model_list = ', '.join(chat_models[:2])
+            return f"Chat model did not respond within {self.MAX_CHAT_TIMEOUT} seconds. Tried: {model_list}."
 
         model = self.model_manager.select_model(mode, 'chat')
-        return f"[fallback:{model}] {prompt}"
+        return f"[fallback:{model}] {cleaned}"
 
 class DarkWebSearch:
     SEARCH_URL = 'https://search.brave.com/search'
@@ -1258,7 +1277,7 @@ def cli_interface():
     while True:
         try:
             show_main_menu()
-            cmd = Prompt.ask("\n[bold red]V> [/bold red]", console=console)
+            cmd = Prompt.ask(f"\n[bold red]V>[/bold red] [green]{mode_short}[/green] [cyan]{persona_short}[/cyan] ", console=console)
             action = parse_command(cmd)
             target = extract_target(cmd)
 
