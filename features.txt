@@ -1,0 +1,259 @@
+🧠 CORE SYSTEM
+AI-powered penetration testing system
+CLI-based primary control
+Web dashboard (client-only reporting)
+Natural language command execution
+SET-style text menu interface (non-numeric)
+Modular + extensible architecture
+Fully autonomous workflow capability
+Multi-agent + multi-model system
+🧾 INTERFACE & COMMAND SYSTEM
+Natural language input (primary)
+Text-based menu selection (SET-style)
+Optional numeric fallback
+Automatic intent detection
+Target extraction (IP / domain / URL)
+Mode auto-selection
+Fuzzy command matching
+Dynamic menu generation
+🎨 CLI VISUALIZATION
+White → normal output
+Red → errors
+Green → executed commands
+Highlight → important target data
+Clear issue highlighting
+No teaching mode (analysis only)
+⚙️ EXECUTION MODES
+Aggressive mode
+Stealth mode
+Fast scan mode
+Detailed analysis mode
+18+ pentesting modes (recon → advanced red team)
+Auto / Manual / Hybrid execution
+Custom user-defined modes
+🤖 AI SYSTEM (MULTI-PERSONA)
+KaliGPT Fast
+KaliGPT Thinking
+0Day Coder
+DarkGPT
+Onion GPT
+Automatic persona selection
+Manual override support
+🤖 MULTI-MODEL ENGINE
+Multiple models (LLaMA3, Mistral, CodeLlama, etc.)
+Parallel model execution
+Dynamic model routing
+Model fusion (combined outputs)
+Self-optimization per task
+Multi-model research engine
+Fallback to single model
+🤖 AGENT SYSTEM
+Orchestrator agent
+Recon agent
+Vulnerability agent
+Exploit agent
+Report agent
+Think → Plan → Act → Observe → Adapt loop
+Autonomous workflows
+Parallel agent execution
+Context-aware task chaining
+Failure recovery + retry logic
+🔗 AUTOMATION SYSTEM
+Fully automated pipelines
+Multi-step execution
+Context-aware decisions
+Continuous execution loop
+🌐 DATA GATHERING & INTELLIGENCE
+Deep multi-source data gathering
+Target intelligence enrichment
+Company/reputation analysis
+Exposure/breach intelligence
+Risk correlation
+🔍 RECONNAISSANCE ENGINE
+Port scanning
+Service detection
+OS fingerprinting
+Subdomain enumeration
+Directory fuzzing (parallel)
+Attack surface mapping
+🧪 VULNERABILITY DETECTION
+🌐 Network
+SSH misconfig detection
+Telnet cleartext detection
+FTP anonymous access
+SMB null session
+RDP misconfig
+VNC no-auth
+IoT default creds
+Tomcat / GlassFish exposure
+🌐 Web
+SQL Injection (error, blind, boolean)
+XSS
+Command injection
+SSRF
+XXE
+Path traversal
+LFI / RFI
+🔐 Auth & Access
+SQL / NoSQL injection bypass
+LDAP injection
+JWT misconfiguration
+Cookie tampering
+Parameter pollution
+HTTP verb tampering
+Case sensitivity bypass
+💥 Execution Vectors
+Webshell upload detection
+Double extension
+MIME mismatch
+Polyglot files
+Command execution patterns
+🔑 Credential Exposure
+/etc/passwd, shadow risks
+SSH key exposure
+Browser credentials
+Git leaks
+AWS / Docker / K8s secrets
+📈 Privilege Escalation
+Linux: SUID, sudo, cron, PATH
+Windows: service paths, DLL hijack, token abuse
+🌐 Lateral Movement
+SMB / RDP / SSH reuse
+WinRM exposure
+Service misuse
+🛡️ Persistence
+SSH keys
+Cronjobs
+Registry / startup
+Services
+🗄️ VULNERABILITY DATABASE
+CVE integration
+Signature-based detection
+Plugin architecture
+Local knowledge base
+CVSS scoring
+Reduced false positives
+💥 EXPLOITATION SYSTEM
+AI-generated exploit logic (controlled validation)
+PoC generation (safe testing context)
+Exploit validation
+Retry & fallback strategies
+Post-analysis workflow support
+🧠 INTELLIGENCE LAYER
+OWASP mapping
+MITRE ATT&CK mapping
+CVSS scoring
+Attack chain reasoning
+🧪 VALIDATION ENGINE
+Proof-based validation
+False-positive reduction
+Multi-model confirmation
+Confidence scoring
+🔐 STEALTH & OPSEC
+Stealth execution mode
+Adaptive scan behavior
+Timing randomization
+Traffic pattern variation (logical)
+Privacy-aware reasoning
+📂 MEMORY SYSTEM
+Stores past scans
+Stores vulnerabilities
+Stores AI outputs
+Context-aware decisions
+Learning-based improvement
+📊 DATABASE SYSTEM
+SQLite storage
+Findings database
+AI chat history
+Persistent scan data
+📁 EVIDENCE COLLECTION
+Request/response logging
+Attack trace storage
+Reproducible findings
+Evidence-backed reporting
+📊 REPORTING SYSTEM
+HTML reports
+PDF reports (optional)
+Real-time updates
+Structured findings
+Severity classification (High / Medium / Low)
+Steps to reproduce
+Evidence + remediation
+Client-safe reporting
+📈 PROGRESS SYSTEM
+Progress bars (scan / analysis / reporting)
+Live execution tracking
+⚡ PERFORMANCE SYSTEM
+Multi-threading
+Parallel agent execution
+Parallel model execution
+ThreadPool fuzzing
+Optimized execution flow
+⚙️ INFRASTRUCTURE & SCALING
+Multi-target scanning
+Distributed-ready architecture
+Task queue design
+Horizontal scaling support
+🔗 INTEGRATIONS
+CI/CD (GitHub, Jenkins)
+SIEM compatibility
+Ticketing systems (Jira, etc.)
+DevSecOps workflow support
+📊 COMPLIANCE & ENTERPRISE
+Basic compliance-aware scanning
+Audit-ready reporting
+Enterprise workflow compatibility
+👥 COLLABORATION
+Multi-user support (design level)
+Role-based access control (RBAC concept)
+Team workflow compatibility
+📡 REAL-TIME MONITORING
+Continuous scanning capability
+Live vulnerability tracking
+Dashboard sync
+🧠 LEARNING SYSTEM
+Feedback-based improvement
+Context reuse
+Adaptive model selection
+Pattern learning
+🔄 SELF-UPDATING SYSTEM
+Updates scanning logic
+Adapts to new vulnerabilities
+Expands capabilities
+🧰 TOOLING LAYER
+HTTP interaction engine
+Python runtime
+OSINT capabilities
+Code analysis
+🧪 ADVANCED TESTING
+Web application testing
+API testing
+Infrastructure misconfiguration detection
+Black-box / Grey-box / White-box (conceptual)
+🧠 ADVANCED REASONING
+Deep reasoning mode
+Long-context understanding
+Multi-step attack simulation
+Context-aware decisions
+🔐 RELIABILITY & HARDENING
+Retry mechanisms
+Timeout handling
+Fail-safe execution
+Error handling system
+Stability improvements
+🧪 EDGE CASE HANDLING
+Complex vulnerability handling
+Chained exploit reasoning
+Adaptive testing logic
+🚀 FINAL SYSTEM CAPABILITY
+Fully autonomous AI pentesting system
+Multi-agent + multi-model execution
+Parallel processing across all layers
+High accuracy with validation
+Reduced false positives
+Reliable analysis workflows
+Scalable architecture
+Enterprise-ready design
+🏁 FINAL PIPELINE
+
+Recon → Intelligence → Scan → Analysis → Validation → Prioritize → Report → Monitor → Learn
