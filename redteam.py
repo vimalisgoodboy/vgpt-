@@ -1088,6 +1088,11 @@ class VulnerabilityEngine:
     def _normalize_text(self, text: str) -> str:
         return re.sub(r'\s+', ' ', text.strip()).lower()
 
+    def _build_repro_command(self, url: str, payload: str) -> str:
+        encoded_payload = quote_plus(payload)
+        base = url.split('?')[0]
+        return f"curl -k -G --data-urlencode 'test={encoded_payload}' '{base}'"
+
     def _is_blocked(self, resp, body: str) -> bool:
         lowered = body.lower()
         if resp.status_code in [403, 406, 429, 501] and any(ind in lowered for ind in self.WAF_INDICATORS):
@@ -1293,6 +1298,7 @@ class VulnerabilityEngine:
             owasp = ''
             response_changed = normalized != baseline.get('body', '')
             payload_reflection = payload in body or payload.lower() in normalized
+            reproduction = self._build_repro_command(url, payload)
 
             if vuln_type == 'sqli':
                 owasp = 'A03:2021'
@@ -1350,15 +1356,25 @@ class VulnerabilityEngine:
                     f"Confirmed {vuln_type.upper()} behavior on request {url}. "
                     f"Proof: {proof}."
                 )
-            elif normalized != baseline.get('body', ''):
+            elif response_changed:
+                reproduction_hint = ''
+                if vuln_type == 'sqli':
+                    reproduction_hint = (
+                        f"Reproduce by sending the same payload to the target parameter. "
+                        f"Compare the response with a baseline request to {url.split('?')[0]} without injection."
+                    )
+                elif vuln_type == 'xss':
+                    reproduction_hint = (
+                        f"Reproduce by injecting the same payload and observing whether it is reflected or executed in the page HTML. "
+                        f"Use browser dev tools or intercept to compare responses."
+                    )
                 description = (
-                    f"Anomalous response was observed for {vuln_type.upper()} payload, but no full exploit proof was identified. "
-                    f"This needs manual verification."
+                    f"Potential {vuln_type.upper()} candidate detected. The response differed from baseline and may indicate injection. {reproduction_hint}"
                 )
             else:
                 return {'vulnerable': False}
 
-            evidence = body[:400]
+            evidence = f"Request URL: {url}\nPayload: {payload}\n{'-'*40}\n{body[:400]}"
             remediation = self._remediation_for_type(vuln_type)
 
             return {
@@ -1367,6 +1383,7 @@ class VulnerabilityEngine:
                 'description': description,
                 'evidence': evidence,
                 'remediation': remediation,
+                'reproduction': reproduction,
                 'cvss': cvss,
                 'confidence': confidence,
                 'severity': severity,
@@ -1490,6 +1507,7 @@ class ReportEngine:
                 <p>{f.get('description', '')}</p>
                 <p><strong>Remediation:</strong> {f.get('remediation', '')}</p>
                 <details><summary>Evidence</summary><pre>{f.get('evidence', '')}</pre></details>
+                {f'<p><strong>Reproduction:</strong> <code>{f.get("reproduction", "")}</code></p>' if f.get('reproduction') else ''}
             </div>
             """
 
