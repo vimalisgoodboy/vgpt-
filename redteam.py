@@ -14,7 +14,7 @@ import base64
 import sqlite3
 import shutil
 from datetime import datetime
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote_plus
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
@@ -349,19 +349,39 @@ fusion_engine = OllamaFusion()
 # ========================================
 class ChatEngine:
     GREETINGS = {'hi', 'hello', 'hey', 'hey there'}
+    LOCAL_RESPONSES = {
+        'what is cybersecurity': (
+            'Cybersecurity is the practice of protecting systems, networks, and data from digital attacks, ' \
+            'unauthorized access, damage, or theft. It covers prevention, detection, and response to threats.'
+        ),
+        'what is cyber security': (
+            'Cybersecurity is the practice of protecting systems, networks, and data from digital attacks, ' \
+            'unauthorized access, damage, or theft. It covers prevention, detection, and response to threats.'
+        ),
+        'what is your name': 'I am V, your local red team assistant. I can answer basic security questions and help with the CLI.',
+        'who are you': 'I am a local assistant built into this red team tool. I can help answer cybersecurity questions and manage the workflow.',
+        'how are you': 'I am ready to help. Ask me about cybersecurity, red teaming, or dark web leak searches.',
+        'help': 'Ask me a question about cybersecurity or red teaming, and I will respond with a straightforward answer. For broader chat, install a local Ollama chat model.'
+    }
+
+    FAST_MODELS = ['phi3:mini', 'gemma2:2b']
 
     def __init__(self, model_manager: ModelManager):
         self.model_manager = model_manager
 
-    MAX_CHAT_TIMEOUT = 5
+    MAX_CHAT_TIMEOUT = 2
 
     def ask(self, prompt: str, mode: str = 'chat') -> str:
         cleaned = prompt.strip()
         if not cleaned:
             return "Please type a question or request."
 
-        if cleaned.lower() in self.GREETINGS:
+        lowered = cleaned.lower()
+        if lowered in self.GREETINGS:
             return "Hello! How can I assist you today?"
+
+        if lowered in ['what is', 'what is ', 'define', 'define ', 'explain', 'explain ', 'tell me', 'tell me ']:
+            return "Please tell me what you want defined or explained so I can answer more quickly."
 
         if self.model_manager.ollama_exe:
             preferred = self.model_manager.PHASE_MODEL_PREFERENCE.get('chat', [])
@@ -370,6 +390,10 @@ class ChatEngine:
                 available = ', '.join(sorted(self.model_manager.available_models)) or 'none'
                 return f"No installed Ollama chat model available. Installed models: {available}. Install phi3:mini or gemma2:2b for faster natural chat."
 
+            prioritized = [m for m in self.FAST_MODELS if m in chat_models]
+            if not prioritized:
+                prioritized = chat_models
+
             system_prompt = (
                 "You are a helpful AI assistant. Answer the user's question directly in natural, conversational language. "
                 "Do not add meta commentary about the model or runtime."
@@ -377,7 +401,7 @@ class ChatEngine:
             user_prompt = f"User: {cleaned}\nAssistant:"
             full_prompt = f"{system_prompt}\n\n{user_prompt}"
 
-            for model in chat_models[:2]:
+            for model in prioritized[:1]:
                 try:
                     completed = subprocess.run(
                         [self.model_manager.ollama_exe, 'run', model, full_prompt],
@@ -393,13 +417,29 @@ class ChatEngine:
                 except Exception:
                     continue
 
-            model_list = ', '.join(chat_models[:2])
-            return f"Chat model did not respond within {self.MAX_CHAT_TIMEOUT} seconds. Tried: {model_list}."
+            return self._local_fallback(cleaned, "Quick mode: local response returned because the chat model did not respond fast enough.")
 
-        model = self.model_manager.select_model(mode, 'chat')
-        return f"[fallback:{model}] {cleaned}"
+        return self._local_fallback(cleaned, "No local Ollama model installed. Install phi3:mini or gemma2:2b for a fuller chat experience.")
+
+    def _local_fallback(self, prompt: str, fallback_message: str) -> str:
+        lowered = prompt.lower()
+        if lowered in self.LOCAL_RESPONSES:
+            return self.LOCAL_RESPONSES[lowered]
+
+        if lowered.startswith('what is ') or lowered.startswith('define ') or lowered.startswith('explain '):
+            term = lowered.replace('what is ', '').replace('define ', '').replace('explain ', '').strip(' ?')
+            return f"{term.capitalize()} is a topic I can explain better once a local chat model is installed. For now, I can help with basic security concepts like cybersecurity, breaches, and red teaming."
+
+        if 'cybersecurity' in lowered or 'security' in lowered:
+            return 'Cybersecurity protects systems and data from digital attacks and unauthorized access. It includes defense, detection, and response capabilities.'
+
+        if 'dark web' in lowered or 'leak' in lowered or 'breach' in lowered:
+            return 'I can search for leaked information through the dark web search tool. Try the H command in the menu to look for breaches or exposed data.'
+
+        return fallback_message
 
 class DarkWebSearch:
+    ONION_SEARCH_URL = 'https://ahmia.fi/search/?q={query}'
     SEARCH_URL = 'https://search.brave.com/search'
     USER_AGENT = 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
     LEAK_INDICATORS = ['leak', 'breach', 'pastebin', 'paste', 'dump', 'leaked', 'password', 'credentials', 'database', 'compromised']
@@ -408,23 +448,98 @@ class DarkWebSearch:
     def search(self, query: str) -> List[Dict[str, str]]:
         if not query:
             return []
-        search_query = f"{query} leaked" if '@' in query else f"{query} leak"
+
+        query_term = query.strip()
+        onion_results = self._search_ahmia(query_term)
+        if onion_results:
+            return onion_results
+
+        search_query = f"{query_term} leaked" if '@' in query_term else f"{query_term} leak"
         try:
             headers = {'User-Agent': self.USER_AGENT}
             resp = requests.get(self.SEARCH_URL, params={'q': search_query}, timeout=10, headers=headers, verify=False)
             html = resp.text
-            results = self._parse_results(html, query)
+            results = self._parse_results(html, query_term)
             if results:
                 return results
         except Exception:
             pass
+
         return [{
             'site': 'no-results',
-            'title': 'No leak-related results found',
-            'snippet': 'The search engine parser did not return any useful leak data. Try a different keyword or verify network access.',
-            'leak_summary': 'Unable to identify leaked details from search results.',
+            'title': 'No leak-related onion results found',
+            'snippet': 'The onion/TOR search parser did not return any useful leak data. Try a different keyword or verify network access.',
+            'leak_summary': 'Unable to identify leaked details from TOR/onion search results.',
             'leaked_attributes': ''
         }]
+
+    def _search_ahmia(self, query: str) -> List[Dict[str, str]]:
+        try:
+            headers = {'User-Agent': self.USER_AGENT}
+            url = self.ONION_SEARCH_URL.format(query=quote_plus(query))
+            resp = requests.get(url, timeout=12, headers=headers, verify=False)
+            html = resp.text
+            results = self._parse_ahmia_results(html, query)
+            if results:
+                return results
+        except Exception:
+            pass
+        return []
+
+    def _parse_ahmia_results(self, html: str, query: str) -> List[Dict[str, str]]:
+        results = []
+        seen = set()
+
+        onion_urls = re.findall(r'\b([a-z2-7]{16,56}\.onion)\b', html, re.I)
+        for onion in onion_urls:
+            url = onion if onion.startswith('http') else f"http://{onion}"
+            if url in seen:
+                continue
+            seen.add(url)
+            snippet = self._extract_onion_snippet(html, onion)
+            leaked_attributes = self._extract_leaked_attributes(snippet)
+            leak_summary = self._extract_leak_summary(onion, snippet, query, leaked_attributes)
+            results.append({
+                'site': url,
+                'title': f'Onion service: {onion}',
+                'snippet': (snippet or f'Hidden service result for {onion}').strip()[:280],
+                'leak_summary': leak_summary,
+                'leaked_attributes': leaked_attributes
+            })
+            if len(results) >= 8:
+                break
+
+        if results:
+            return results
+
+        for match in re.finditer(r'<a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', html, re.S):
+            raw_url = match.group(1)
+            title = re.sub(r'<.*?>', '', match.group(2)).strip()
+            if not title:
+                continue
+            if raw_url.startswith('/'):
+                raw_url = f'https://ahmia.fi{raw_url}'
+            if any(domain in raw_url for domain in self.EXCLUDED_DOMAINS):
+                continue
+            if raw_url in seen:
+                continue
+            seen.add(raw_url)
+            snippet = self._extract_snippet(html, raw_url)
+            if '.onion' not in raw_url.lower() and '.onion' not in snippet.lower():
+                continue
+            leaked_attributes = self._extract_leaked_attributes(snippet)
+            leak_summary = self._extract_leak_summary(title, snippet, query, leaked_attributes)
+            results.append({
+                'site': raw_url,
+                'title': title,
+                'snippet': (snippet or title).strip()[:280],
+                'leak_summary': leak_summary,
+                'leaked_attributes': leaked_attributes
+            })
+            if len(results) >= 8:
+                break
+
+        return results
 
     def _parse_results(self, html: str, query: str) -> List[Dict[str, str]]:
         results = []
@@ -439,7 +554,7 @@ class DarkWebSearch:
             seen.add(url)
             snippet = self._extract_snippet(html, url)
             leak_score = sum(term in snippet.lower() for term in self.LEAK_INDICATORS)
-            if leak_score > 0 or ('@' in query and query.lower() in snippet.lower()) or len(results) < 4:
+            if leak_score > 0 or ('.onion' in url.lower()) or ('@' in query and query.lower() in snippet.lower()) or len(results) < 4:
                 leaked_attributes = self._extract_leaked_attributes(snippet)
                 leak_summary = self._extract_leak_summary(title, snippet, query, leaked_attributes)
                 results.append({
@@ -456,15 +571,17 @@ class DarkWebSearch:
     def _extract_leak_summary(self, title: str, snippet: str, query: str, leaked_attributes: str) -> str:
         text = f"{title} {snippet}".lower()
         if 'compromised data' in text or 'compromised' in text:
-            return 'This result indicates compromised data exposure.'
+            return 'This result indicates compromised data exposure on onion/TOR sources.'
         if 'breach' in text or 'leak' in text or 'exposed' in text:
-            summary = 'Leaked data mentioned in search result.'
+            summary = 'Leaked data or breach content mentioned in the result.'
             if leaked_attributes:
                 summary += f' Likely leaked fields: {leaked_attributes}.'
             return summary
         if leaked_attributes:
             return f'Potential leaked fields: {leaked_attributes}.'
-        return 'Leak-related search result found.'
+        if '.onion' in text:
+            return 'Hidden-service onion page found that may contain leaked information.'
+        return 'Potential onion/TOR leak-related result.'
 
     def _extract_leaked_attributes(self, text: str) -> str:
         categories = [
@@ -484,6 +601,14 @@ class DarkWebSearch:
         if pos == -1:
             return ''
         snippet = html[max(0, pos - 220):pos + len(url) + 220]
+        snippet = re.sub(r'<.*?>', ' ', snippet)
+        return re.sub(r'\s+', ' ', snippet).strip()
+
+    def _extract_onion_snippet(self, html: str, onion: str) -> str:
+        pos = html.lower().find(onion.lower())
+        if pos == -1:
+            return ''
+        snippet = html[max(0, pos - 220):pos + len(onion) + 220]
         snippet = re.sub(r'<.*?>', ' ', snippet)
         return re.sub(r'\s+', ' ', snippet).strip()
 
@@ -1230,7 +1355,7 @@ def show_main_menu():
     menu.add_row("[bold cyan]D[/bold cyan]", "Exploit payloads")
     menu.add_row("[bold cyan]E[/bold cyan]", "Generate report")
     menu.add_row("[bold cyan]G[/bold cyan]", "Chatbot (general ChatGPT-like)")
-    menu.add_row("[bold cyan]H[/bold cyan]", "Dark web leak search")
+    menu.add_row("[bold cyan]H[/bold cyan]", "Dark web leak search (TOR/Onion)")
     menu.add_row("[bold cyan]I[/bold cyan]", "Launch vulnerability dashboard")
     menu.add_row("[bold cyan]M[/bold cyan]", "Set execution mode")
     menu.add_row("[bold cyan]P[/bold cyan]", "Set persona")
