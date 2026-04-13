@@ -1,10 +1,5 @@
 #!/usr/bin/env python3
-"""
-HackerAI Red Team - Fully Autonomous Penetration Testing System
-Implements the complete FINAL PIPELINE: Recon → Intelligence → Scan → Analysis → Validation → Prioritize → Report → Monitor → Learn
 
-Multi-agent, multi-model, parallel execution with all specified capabilities.
-"""
 
 import os
 import sys
