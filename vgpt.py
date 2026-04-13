@@ -770,6 +770,14 @@ class RedTeamOrchestrator:
         pipeline_model = model_manager.select_model(self.mode, 'pipeline')
         console.print(f"[cyan]Persona:[/cyan] {self.persona} | [cyan]Primary model:[/cyan] {pipeline_model}")
 
+        console.print("[magenta]Model assignments:[/magenta]")
+        console.print(f"  Recon      -> {model_manager.select_model(self.mode, 'recon')}")
+        console.print(f"  Scan       -> {model_manager.select_model(self.mode, 'scan')}")
+        console.print(f"  Analysis   -> {model_manager.select_model(self.mode, 'analysis')}")
+        console.print(f"  Validation -> {model_manager.select_model(self.mode, 'validation')}")
+        console.print(f"  Exploit    -> {model_manager.select_model(self.mode, 'exploit')}")
+        console.print(f"  Report     -> {model_manager.select_model(self.mode, 'report')}")
+
         # 1. RECON
         recon_model = model_manager.select_model(self.mode, 'recon')
         console.print(f"[cyan]Recon model:[/cyan] {recon_model}")
