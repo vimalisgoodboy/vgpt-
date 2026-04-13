@@ -14,7 +14,7 @@ import base64
 import sqlite3
 import shutil
 from datetime import datetime
-from urllib.parse import urlparse, parse_qs, quote_plus
+from urllib.parse import urlparse, parse_qs, quote_plus, urljoin
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import argparse
@@ -858,6 +858,9 @@ class VulnerabilityEngine:
     WORDLIST_CACHE_DIR = Path('.wordlist_cache')
     WORDLIST_MAX_ENTRIES = 60
     SQLI_LOGIN_PAYLOADS = ["' OR '1'='1", '" OR "1"="1"', "' OR 1=1--", "' OR 'a'='a"]
+    SCAN_HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
+    }
 
     def scan_web(self, target: str) -> List[Dict]:
         """Full web vulnerability scan with validation and WAF detection."""
@@ -879,16 +882,18 @@ class VulnerabilityEngine:
             )
             return findings
 
-        target = self._strip_fragment(target)
+        target = self._normalize_url(self._strip_fragment(target))
 
-        baseline = self._get_baseline_response(target)
+        session = requests.Session()
+        session.headers.update(self.SCAN_HEADERS)
+        baseline = self._get_baseline_response(target, session)
         params = self._extract_params(target)
         waf_hits = []
         seen_titles = set()
 
         login_info = self._detect_login_page(baseline.get('body', ''))
         if login_info.get('detected'):
-            login_results = self._attempt_login_bruteforce(target, login_info, baseline)
+            login_results = self._attempt_login_bruteforce(target, login_info, baseline, session)
             for result in login_results:
                 if result['title'] in seen_titles:
                     continue
@@ -909,8 +914,8 @@ class VulnerabilityEngine:
 
         for vuln_type, payloads in self.PAYLOADS.items():
             for payload in payloads:
-                test_url = f"{target}?test={payload}" if not params else f"{target}&test={payload}"
-                result = self._test_payload(test_url, vuln_type, payload, baseline)
+                test_url = f"{target}?test={quote_plus(payload)}" if not params else f"{target}&test={quote_plus(payload)}"
+                result = self._test_payload(test_url, vuln_type, payload, baseline, session)
                 if result.get('blocked'):
                     waf_hits.append(result.get('blocking_reason', 'WAF block'))
                     continue
@@ -965,6 +970,15 @@ class VulnerabilityEngine:
     def _extract_params(self, url: str) -> bool:
         return '?' in url
 
+    def _normalize_url(self, url: str) -> str:
+        parsed = urlparse(url)
+        if not parsed.scheme:
+            url = 'http://' + url
+            parsed = urlparse(url)
+        path = re.sub(r'/+', '/', parsed.path)
+        normalized = parsed._replace(path=path).geturl()
+        return normalized
+
     def _is_fragment_target(self, url: str) -> bool:
         return bool(urlparse(url).fragment)
 
@@ -1018,12 +1032,15 @@ class VulnerabilityEngine:
             passwords = [p for _, p in self.BRUTE_FORCE_CREDENTIALS]
         return list(dict.fromkeys(passwords))[:self.WORDLIST_MAX_ENTRIES]
 
-    def _attempt_login_sqli(self, post_url: str, username_field: str, password_field: str, baseline: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _attempt_login_sqli(self, post_url: str, username_field: str, password_field: str, baseline: Dict[str, Any], session: Optional[requests.Session] = None, hidden_fields: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
+        client = session or requests
+        hidden_fields = hidden_fields or {}
         for payload in self.SQLI_LOGIN_PAYLOADS:
             try:
-                resp = requests.post(
+                data = {username_field: payload, password_field: payload, **hidden_fields}
+                resp = client.post(
                     post_url,
-                    data={username_field: payload, password_field: payload},
+                    data=data,
                     timeout=8,
                     verify=False,
                     allow_redirects=True
@@ -1034,18 +1051,20 @@ class VulnerabilityEngine:
                 login_failed = any(term in normalized for term in ['invalid', 'incorrect', 'failed', 'error', 'try again', 'unauthorized'])
                 login_page_still = any(term in normalized for term in ['login', 'username', 'password', 'sign in', 'signin'])
                 success_redirect = bool(resp.history) or (resp.url and 'login' not in resp.url.lower() and 'signin' not in resp.url.lower())
+                response_changed = normalized != baseline.get('body', '')
 
-                if sql_error or success_redirect or (not login_failed and not login_page_still and normalized != baseline.get('body', '')):
+                if sql_error or success_redirect or (not login_failed and not login_page_still and response_changed):
                     evidence = f"POST {post_url} -> {username_field}={payload} | {password_field}={payload} | status {resp.status_code}\n{body[:300]}"
+                    title = 'Login form SQL injection confirmed' if sql_error else 'Login form SQL injection candidate'
                     return {
                         'vulnerable': True,
-                        'confirmed': success_redirect and not sql_error,
-                        'title': 'Login form SQL injection candidate',
-                        'description': 'Potential SQL injection or login bypass was observed against the authentication form. This requires manual verification.',
+                        'confirmed': sql_error,
+                        'title': title,
+                        'description': 'Potential SQL injection or authentication bypass was observed against the login form. The response differed from the baseline and requires manual verification.',
                         'evidence': evidence,
                         'remediation': 'Sanitize authentication inputs, parameterize database queries, and enforce strict login validation.',
                         'cvss': 6.5,
-                        'confidence': 0.65,
+                        'confidence': 0.7 if sql_error else 0.55,
                         'severity': 'medium',
                         'owasp': 'A03:2021'
                     }
@@ -1053,16 +1072,18 @@ class VulnerabilityEngine:
                 continue
         return None
 
-    def _get_baseline_response(self, target: str) -> Dict[str, Any]:
+    def _get_baseline_response(self, target: str, session: Optional[requests.Session] = None) -> Dict[str, Any]:
         try:
             baseline_url = target if target.startswith('http') else f"http://{target}"
-            resp = requests.get(baseline_url, timeout=8, verify=False)
+            client = session or requests
+            resp = client.get(baseline_url, timeout=8, verify=False)
             return {
                 'status': resp.status_code,
-                'body': self._normalize_text(resp.text)
+                'body': self._normalize_text(resp.text),
+                'raw_body': resp.text or ''
             }
         except Exception:
-            return {'status': None, 'body': ''}
+            return {'status': None, 'body': '', 'raw_body': ''}
 
     def _normalize_text(self, text: str) -> str:
         return re.sub(r'\s+', ' ', text.strip()).lower()
@@ -1074,46 +1095,113 @@ class VulnerabilityEngine:
         return any(ind in lowered for ind in self.WAF_INDICATORS)
 
     def _detect_login_page(self, body: str) -> Dict[str, Any]:
-        lowered = body.lower()
-        if '<form' not in lowered or 'password' not in lowered:
-            return {'detected': False}
+        forms = self._extract_forms(body)
+        for form in forms:
+            inputs = form['inputs']
+            if not any('password' in name.lower() for name in inputs):
+                continue
+            if not any(keyword in form['raw'].lower() or keyword in form['action'].lower() for keyword in self.LOGIN_KEYWORDS):
+                continue
 
-        if not any(keyword in lowered for keyword in self.LOGIN_KEYWORDS):
-            return {'detected': False}
+            username_field = self._find_input_name(inputs, ['username', 'user', 'email', 'login'])
+            password_field = self._find_input_name(inputs, ['password', 'pass', 'pwd'])
+            hidden_fields = {
+                name: value for name, value in inputs.items()
+                if name not in [username_field, password_field] and value
+            }
+            return {
+                'detected': True,
+                'action': form['action'],
+                'method': form['method'],
+                'username_field': username_field,
+                'password_field': password_field,
+                'hidden_fields': hidden_fields
+            }
+        return {'detected': False}
 
-        action_match = re.search(r'<form[^>]*action=["\']([^"\']+)["\']', body, re.I)
-        action = action_match.group(1).strip() if action_match else ''
-        username_field = self._find_input_name(body, ['username', 'user', 'email', 'login'])
-        password_field = self._find_input_name(body, ['password', 'pass', 'pwd'])
-        return {
-            'detected': True,
-            'action': action,
-            'username_field': username_field,
-            'password_field': password_field
-        }
+    def _extract_forms(self, html: str) -> List[Dict[str, Any]]:
+        forms = []
+        for match in re.finditer(r'(<form\b.*?>)(.*?)</form>', html, re.I | re.S):
+            form_tag, form_body = match.groups()
+            action_match = re.search(r'action=["\']([^"\']+)["\']', form_tag, re.I)
+            method_match = re.search(r'method=["\']([^"\']+)["\']', form_tag, re.I)
+            action = action_match.group(1).strip() if action_match else ''
+            method = method_match.group(1).strip().lower() if method_match else 'post'
+            inputs = {}
+            for input_tag in re.finditer(r'<input\b[^>]*>', form_body, re.I):
+                input_html = input_tag.group(0)
+                name_match = re.search(r'name=["\']([^"\']+)["\']', input_html, re.I)
+                if not name_match:
+                    continue
+                name = name_match.group(1)
+                value_match = re.search(r'value=["\']([^"\']*)["\']', input_html, re.I)
+                value = value_match.group(1) if value_match else ''
+                inputs[name] = value
+            forms.append({'action': action, 'method': method, 'inputs': inputs, 'raw': form_tag + form_body})
+        return forms
 
-    def _find_input_name(self, html: str, names: List[str]) -> str:
-        for match in re.finditer(r'<input[^>]*name=["\']([^"\']+)["\']', html, re.I):
-            input_name = match.group(1)
-            for candidate in names:
+    def _find_input_name(self, inputs: Dict[str, str], names: List[str]) -> str:
+        for candidate in names:
+            for input_name in inputs.keys():
                 if candidate in input_name.lower():
                     return input_name
-        return names[0]
+        return next(iter(inputs.keys()), names[0])
 
-    def _attempt_login_bruteforce(self, target: str, login_info: Dict[str, Any], baseline: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _build_post_url(self, base_url: str, action: str) -> str:
+        if not action:
+            return base_url
+        return urljoin(base_url, action)
+
+    def _attempt_login_sqli(self, post_url: str, username_field: str, password_field: str, baseline: Dict[str, Any], session: Optional[requests.Session] = None, hidden_fields: Optional[Dict[str, str]] = None) -> Optional[Dict[str, Any]]:
+        client = session or requests
+        hidden_fields = hidden_fields or {}
+        for payload in self.SQLI_LOGIN_PAYLOADS:
+            try:
+                data = {username_field: payload, password_field: payload, **hidden_fields}
+                resp = client.post(
+                    post_url,
+                    data=data,
+                    timeout=8,
+                    verify=False,
+                    allow_redirects=True
+                )
+                body = resp.text or ''
+                normalized = self._normalize_text(body)
+                sql_error = any(err in normalized for err in self.SQL_ERROR_INDICATORS)
+                login_failed = any(term in normalized for term in ['invalid', 'incorrect', 'failed', 'error', 'try again', 'unauthorized'])
+                login_page_still = any(term in normalized for term in ['login', 'username', 'password', 'sign in', 'signin'])
+                success_redirect = bool(resp.history) or (resp.url and 'login' not in resp.url.lower() and 'signin' not in resp.url.lower())
+                response_changed = normalized != baseline.get('body', '')
+
+                if sql_error or success_redirect or (not login_failed and not login_page_still and response_changed):
+                    evidence = f"POST {post_url} -> {username_field}={payload} | {password_field}={payload} | status {resp.status_code}\n{body[:300]}"
+                    title = 'Login form SQL injection confirmed' if sql_error else 'Login form SQL injection candidate'
+                    return {
+                        'vulnerable': True,
+                        'confirmed': sql_error,
+                        'title': title,
+                        'description': 'Potential SQL injection or authentication bypass was observed against the login form. The response differed from the baseline and requires manual verification.',
+                        'evidence': evidence,
+                        'remediation': 'Sanitize authentication inputs, parameterize database queries, and enforce strict login validation.',
+                        'cvss': 6.5,
+                        'confidence': 0.7 if sql_error else 0.55,
+                        'severity': 'medium',
+                        'owasp': 'A03:2021'
+                    }
+            except Exception:
+                continue
+        return None
+
+    def _attempt_login_bruteforce(self, target: str, login_info: Dict[str, Any], baseline: Dict[str, Any], session: Optional[requests.Session] = None) -> List[Dict[str, Any]]:
         results = []
         base_url = target if target.startswith('http') else f'http://{target}'
-        post_url = login_info.get('action') or base_url
-        if post_url.startswith('/'):
-            parsed = urlparse(base_url)
-            post_url = f"{parsed.scheme}://{parsed.netloc}{post_url}"
-        elif not post_url.startswith('http'):
-            post_url = base_url.rstrip('/') + '/' + post_url.lstrip('/')
-
+        post_url = self._build_post_url(base_url, login_info.get('action', ''))
         username_field = login_info.get('username_field', 'username')
         password_field = login_info.get('password_field', 'password')
+        hidden_fields = login_info.get('hidden_fields', {})
+        client = session or requests
 
-        sqli_result = self._attempt_login_sqli(post_url, username_field, password_field, baseline)
+        sqli_result = self._attempt_login_sqli(post_url, username_field, password_field, baseline, client, hidden_fields)
         if sqli_result:
             results.append(sqli_result)
             if sqli_result.get('confirmed'):
@@ -1133,11 +1221,16 @@ class VulnerabilityEngine:
         if not credentials:
             credentials = self.BRUTE_FORCE_CREDENTIALS
 
+        login_attempts = 0
         for username, password in credentials:
+            if login_attempts >= 120:
+                break
+            login_attempts += 1
             try:
-                resp = requests.post(
+                data = {username_field: username, password_field: password, **hidden_fields}
+                resp = client.post(
                     post_url,
-                    data={username_field: username, password_field: password},
+                    data=data,
                     timeout=8,
                     verify=False,
                     allow_redirects=True
@@ -1169,7 +1262,7 @@ class VulnerabilityEngine:
             'vulnerable': True,
             'title': 'Login page detected; brute force attempted',
             'description': 'A login/authentication form was detected and a wordlist-based credential check was attempted. No login was confirmed from this limited set of checks.',
-            'evidence': f'Target: {post_url} | username field: {username_field} | password field: {password_field} | attempted {min(len(credentials), 120)} combos',
+            'evidence': f'Target: {post_url} | username field: {username_field} | password field: {password_field} | attempted {login_attempts} combos',
             'remediation': 'Review authentication controls, apply rate limiting, and validate login endpoints manually with a full authorized credential list.',
             'cvss': 4.0,
             'confidence': 0.55,
@@ -1178,9 +1271,10 @@ class VulnerabilityEngine:
         })
         return results
 
-    def _test_payload(self, url: str, vuln_type: str, payload: str, baseline: Dict[str, Any]) -> Dict[str, Any]:
+    def _test_payload(self, url: str, vuln_type: str, payload: str, baseline: Dict[str, Any], session: Optional[requests.Session] = None) -> Dict[str, Any]:
         try:
-            resp = requests.get(url, timeout=8, verify=False)
+            client = session or requests
+            resp = client.get(url, timeout=8, verify=False)
             body = resp.text or ''
             normalized = self._normalize_text(body)
             blocked = self._is_blocked(resp, body)
@@ -1197,23 +1291,25 @@ class VulnerabilityEngine:
             description = 'No confirmed exploit proof available.'
             proof = ''
             owasp = ''
+            response_changed = normalized != baseline.get('body', '')
+            payload_reflection = payload in body or payload.lower() in normalized
 
             if vuln_type == 'sqli':
                 owasp = 'A03:2021'
                 if any(err in normalized for err in self.SQL_ERROR_INDICATORS):
                     confirmed = True
                     proof = next(err for err in self.SQL_ERROR_INDICATORS if err in normalized)
-                elif payload.lower() in normalized and any(term in normalized for term in ['sql', 'database', 'syntax', 'error']):
+                elif payload_reflection and any(term in normalized for term in ['sql', 'database', 'syntax', 'error']):
                     confirmed = True
                     proof = 'Payload reflected with SQL-related text in response.'
-                elif resp.status_code == 500 and baseline.get('status') and baseline['status'] < 400 and normalized != baseline.get('body', ''):
+                elif resp.status_code == 500 and baseline.get('status') and baseline['status'] < 400 and response_changed:
                     confirmed = True
                     proof = 'Server error response changed from baseline after injection payload.'
                 title = 'SQL Injection confirmed' if confirmed else 'SQL Injection candidate'
 
             elif vuln_type == 'xss':
                 owasp = 'A03:2021'
-                if payload in body:
+                if payload in body or '<script>alert(1)' in body.lower() or 'onerror' in body.lower():
                     confirmed = True
                     proof = 'Payload reflected in response body.'
                 title = 'Reflected XSS confirmed' if confirmed else 'Reflected XSS candidate'
