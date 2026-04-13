@@ -506,51 +506,229 @@ class VulnerabilityEngine:
     PAYLOADS = {
         'sqli': ["' OR 1=1--", "1' AND 1=2 UNION SELECT NULL--", "' OR 'a'='a", "1; DROP TABLE users--"],
         'xss': ["<script>alert(1)</script>", "<img src=x onerror=alert(1)>", "javascript:alert(1)", 
-                "{{7*7}}", "<svg onload=alert(1)>"],
+                "{{7*7}}", "<svg onload=alert(1)>"] ,
         'cmd_inj': ["; ls -la", "| whoami", "&& id", "`whoami`", "$(id)"],
         'ssrf': ["http://169.254.169.254/latest/meta-data/", "http://127.0.0.1:22", 
                 "file:///etc/passwd", "http://[::]:22"],
         'xxe': ['<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>']
     }
-    
+
+    WAF_INDICATORS = [
+        'mod_security', 'modsecurity', 'mod_sec', 'access denied by policy', 'request blocked',
+        'waf', 'burst mode', 'security check', 'forbidden', 'blocked by', 'web application firewall'
+    ]
+
+    SQL_ERROR_INDICATORS = [
+        'sql syntax', 'mysql_fetch', 'syntax to use near', 'unclosed quotation mark',
+        'odbc sql', 'sqlstate', 'mysql', 'pg_query', 'ora-', 'syntax error'
+    ]
+
+    CMD_INDICATORS = [
+        'uid=', 'gid=', '/bin/', 'root', 'home/', 'bash', 'sh: command', 'command not found'
+    ]
+
+    XXE_INDICATORS = ['root:', '/etc/passwd', 'file:///etc/passwd', 'external entity', 'entity expansion']
+    SSRF_INDICATORS = ['169.254.169.254', 'instance-id', 'metadata', 'ec2', 'gce', 'openstack']
+
     def scan_web(self, target: str) -> List[Dict]:
-        """Full web vulnerability scan"""
+        """Full web vulnerability scan with validation and WAF detection."""
         findings = []
+        baseline = self._get_baseline_response(target)
         params = self._extract_params(target)
+        waf_hits = []
+        seen_titles = set()
 
         for vuln_type, payloads in self.PAYLOADS.items():
             for payload in payloads:
                 test_url = f"{target}?test={payload}" if not params else f"{target}&test={payload}"
-                result = self._test_payload(test_url, vuln_type)
-                if result['vulnerable']:
-                    findings.append(result)
-                    db.add_finding(target, 'scan', 'high', f"{vuln_type.upper()} Vulnerable",
-                                 result['description'], result['evidence'],
-                                 f"Sanitize {vuln_type} inputs", 8.5, 0.9,
-                                 owasp=f"A03:{vuln_type.title()}")
+                result = self._test_payload(test_url, vuln_type, payload, baseline)
+                if result.get('blocked'):
+                    waf_hits.append(result.get('blocking_reason', 'WAF block'))
+                    continue
+                if not result.get('vulnerable'):
+                    continue
+
+                if result['title'] in seen_titles:
+                    continue
+                seen_titles.add(result['title'])
+                findings.append(result)
+                db.add_finding(
+                    target,
+                    'scan',
+                    result['severity'],
+                    result['title'],
+                    result['description'],
+                    result['evidence'],
+                    result['remediation'],
+                    result['cvss'],
+                    result['confidence'],
+                    owasp=result.get('owasp', '')
+                )
+
+        if not findings:
+            if len(waf_hits) >= 2:
+                waf_description = ' '.join(sorted(set(waf_hits)))[:800]
+                db.add_finding(
+                    target,
+                    'scan',
+                    'info',
+                    'WAF/ModSecurity detected',
+                    'Multiple payloads were blocked or filtered. This indicates active WAF protection, not a confirmed vulnerability.',
+                    waf_description,
+                    'Review WAF rules and perform authenticated, manual validation to confirm any true vulnerabilities.',
+                    0.0,
+                    0.7
+                )
+            else:
+                db.add_finding(
+                    target,
+                    'scan',
+                    'info',
+                    'No confirmed vulnerability',
+                    'Payload results did not provide exploitation proof. No validated SQLi, XSS, SSRF, XXE, or command execution was observed.',
+                    '',
+                    'Retest with manual verification, parameter analysis, and proof-based checks.',
+                    0.0,
+                    0.65
+                )
         return findings
-    
+
     def _extract_params(self, url: str) -> bool:
         return '?' in url
-    
-    def _test_payload(self, url: str, vuln_type: str) -> Dict:
+
+    def _get_baseline_response(self, target: str) -> Dict[str, Any]:
         try:
-            resp = requests.get(url, timeout=5, verify=False)
-            vulnerable = resp.status_code == 500 or any(
-                indicator in resp.text.lower() 
-                for indicator in ['error', 'warning', 'syntax']
-            )
-            description = f"Potential {vuln_type.upper()} issue found on {url}"
+            baseline_url = target if target.startswith('http') else f"http://{target}"
+            resp = requests.get(baseline_url, timeout=8, verify=False)
             return {
-                'vulnerable': vulnerable,
-                'payload': url.split('test=')[-1],
-                'response': resp.text[:100],
                 'status': resp.status_code,
-                'description': description,
-                'evidence': resp.text[:200]
+                'body': self._normalize_text(resp.text)
             }
         except Exception:
-            return {'vulnerable': False, 'description': '', 'evidence': ''}
+            return {'status': None, 'body': ''}
+
+    def _normalize_text(self, text: str) -> str:
+        return re.sub(r'\s+', ' ', text.strip()).lower()
+
+    def _is_blocked(self, resp, body: str) -> bool:
+        lowered = body.lower()
+        if resp.status_code in [403, 406, 429, 501] and any(ind in lowered for ind in self.WAF_INDICATORS):
+            return True
+        return any(ind in lowered for ind in self.WAF_INDICATORS)
+
+    def _test_payload(self, url: str, vuln_type: str, payload: str, baseline: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            resp = requests.get(url, timeout=8, verify=False)
+            body = resp.text or ''
+            normalized = self._normalize_text(body)
+            blocked = self._is_blocked(resp, body)
+            if blocked:
+                return {
+                    'blocked': True,
+                    'blocking_reason': 'WAF/ModSecurity pattern detected',
+                    'title': f'{vuln_type.upper()} test blocked',
+                    'description': 'Payload was blocked before vulnerability proof could be established.',
+                    'evidence': normalized[:300]
+                }
+
+            confirmed = False
+            description = 'No confirmed exploit proof available.'
+            proof = ''
+            owasp = ''
+
+            if vuln_type == 'sqli':
+                owasp = 'A03:2021'
+                if any(err in normalized for err in self.SQL_ERROR_INDICATORS):
+                    confirmed = True
+                    proof = next(err for err in self.SQL_ERROR_INDICATORS if err in normalized)
+                elif payload.lower() in normalized and 'sql' in normalized:
+                    confirmed = True
+                    proof = 'Payload reflected with SQL error hints.'
+                elif resp.status_code == 500 and normalized != baseline.get('body', ''):
+                    proof = 'Server error response differs from baseline.'
+                    confirmed = True
+                title = 'SQL Injection confirmed' if confirmed else 'SQL Injection candidate'
+
+            elif vuln_type == 'xss':
+                owasp = 'A03:2021'
+                if payload in body:
+                    confirmed = True
+                    proof = 'Payload reflected in response body.'
+                title = 'Reflected XSS confirmed' if confirmed else 'Reflected XSS candidate'
+
+            elif vuln_type == 'cmd_inj':
+                owasp = 'A05:2021'
+                if any(ind in normalized for ind in self.CMD_INDICATORS):
+                    confirmed = True
+                    proof = next(ind for ind in self.CMD_INDICATORS if ind in normalized)
+                title = 'Command injection confirmed' if confirmed else 'Command injection candidate'
+
+            elif vuln_type == 'ssrf':
+                owasp = 'A04:2021'
+                if any(ind in normalized for ind in self.SSRF_INDICATORS):
+                    confirmed = True
+                    proof = next(ind for ind in self.SSRF_INDICATORS if ind in normalized)
+                title = 'SSRF confirmed' if confirmed else 'SSRF candidate'
+
+            elif vuln_type == 'xxe':
+                owasp = 'A04:2021'
+                if any(ind in normalized for ind in self.XXE_INDICATORS):
+                    confirmed = True
+                    proof = next(ind for ind in self.XXE_INDICATORS if ind in normalized)
+                title = 'XXE confirmed' if confirmed else 'XXE candidate'
+
+            severity = 'high' if confirmed else 'medium'
+            cvss = self._score_cvss(vuln_type, confirmed)
+            confidence = 0.9 if confirmed else 0.5
+
+            if confirmed:
+                description = (
+                    f"Confirmed {vuln_type.upper()} behavior on request {url}. "
+                    f"Proof: {proof}."
+                )
+            elif normalized != baseline.get('body', ''):
+                description = (
+                    f"Anomalous response was observed for {vuln_type.upper()} payload, but no full exploit proof was identified. "
+                    f"This needs manual verification."
+                )
+            else:
+                return {'vulnerable': False}
+
+            evidence = body[:400]
+            remediation = self._remediation_for_type(vuln_type)
+
+            return {
+                'vulnerable': True,
+                'title': title,
+                'description': description,
+                'evidence': evidence,
+                'remediation': remediation,
+                'cvss': cvss,
+                'confidence': confidence,
+                'severity': severity,
+                'owasp': owasp
+            }
+        except Exception:
+            return {'vulnerable': False}
+
+    def _score_cvss(self, vuln_type: str, confirmed: bool) -> float:
+        base = {
+            'sqli': 8.0,
+            'xss': 6.5,
+            'cmd_inj': 8.5,
+            'ssrf': 7.5,
+            'xxe': 7.0
+        }.get(vuln_type, 5.0)
+        return min(base + (1.0 if confirmed else 0.0), 10.0)
+
+    def _remediation_for_type(self, vuln_type: str) -> str:
+        return {
+            'sqli': 'Validate and parameterize database inputs. Use ORM or prepared statements.',
+            'xss': 'Escape output, use content security policy, and validate input.',
+            'cmd_inj': 'Avoid shell execution with user input. Use safe APIs and input validation.',
+            'ssrf': 'Validate and whitelist outbound URLs. Block internal metadata access.',
+            'xxe': 'Disable external entity processing and validate XML input.'
+        }.get(vuln_type, 'Sanitize and validate user input.')
 
 vuln_engine = VulnerabilityEngine()
 
@@ -608,7 +786,6 @@ class ReportEngine:
         """Generate HTML + evidence report"""
         findings = db.get_findings(target) if hasattr(db, 'get_findings') else []
         prioritized = prioritizer.score_findings(findings)
-        
         html = self._render_html_report(target, prioritized)
         report_path = Path(f"redteam_report_{target.replace('/', '_')}.html")
         with report_path.open("w") as f:
@@ -618,35 +795,52 @@ class ReportEngine:
             webbrowser.open(report_path.resolve().as_uri())
         except Exception:
             pass
-    
+
     def _render_html_report(self, target: str, findings: List) -> str:
-        findings_html = ""
-        for f in findings:
-            color = "red" if f.get('cvss', 0) > 7 else "orange"
+        unique_findings = []
+        seen = set()
+        for finding in findings:
+            key = (finding.get('title'), finding.get('description'), finding.get('evidence'))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_findings.append(finding)
+
+        if not unique_findings:
+            summary_html = '<p>No confirmed vulnerabilities were validated. Review WAF detection and manual verification results.</p>'
+        else:
+            summary_html = f'<p>Total confirmed findings: {len(unique_findings)}</p>'
+
+        findings_html = ''
+        for f in unique_findings:
+            color = 'red' if f.get('cvss', 0) > 7 else 'orange'
             findings_html += f"""
-            <div class="finding {color}">
+            <div class=\"finding {color}\">
                 <h3>{f.get('title', 'Finding')}</h3>
-                <p><strong>CVSS:</strong> {f.get('cvss', 0):.1f} | 
-                   <strong>Stage:</strong> {f.get('stage', 'unknown')}</p>
+                <p><strong>Stage:</strong> {f.get('stage', 'unknown')} | <strong>Severity:</strong> {f.get('severity', 'unknown')} | <strong>CVSS:</strong> {f.get('cvss', 0):.1f}</p>
                 <p>{f.get('description', '')}</p>
+                <p><strong>Remediation:</strong> {f.get('remediation', '')}</p>
                 <details><summary>Evidence</summary><pre>{f.get('evidence', '')}</pre></details>
             </div>
             """
-        
+
         return f"""
 <!DOCTYPE html>
 <html>
 <head><title>RedTeam Report - {target}</title>
 <style>
-body {{ font-family: Arial; margin: 40px; background: #1a1a1a; color: #fff; }}
-.finding {{ padding: 20px; margin: 15px 0; border-radius: 8px; }}
-.red {{ background: #ffebee; color: #d32f2f; border-left: 5px solid #f44336; }}
-.orange {{ background: #fff3e0; color: #e65100; border-left: 5px solid #ff9800; }}
+body {{ font-family: Arial; margin: 40px; background: #111; color: #fff; }}
+.finding {{ padding: 20px; margin: 20px 0; border-radius: 8px; background: #181818; }}
+.red {{ border-left: 5px solid #f44336; }}
+.orange {{ border-left: 5px solid #ff9800; }}
+summary {{ cursor: pointer; color: #aad9ff; }}
+pre {{ background: #0f0f0f; padding: 12px; border-radius: 6px; overflow-x: auto; }}
 </style></head>
 <body>
 <h1>🚀 RedTeam Autonomous Pentest Report</h1>
 <h2>Target: {target}</h2>
-<div id="findings">{findings_html}</div>
+<div>{summary_html}</div>
+<div id=\"findings\">{findings_html}</div>
 </body></html>
         """
 
@@ -783,11 +977,7 @@ class RedTeamOrchestrator:
         console.print("[bold cyan]🔎 STAGE 3: VULNERABILITY SCAN[/bold cyan]")
         vuln_findings = vuln_engine.scan_web(target)
         db.add_finding(target, 'scan', 'info', 'Vuln Scan Started', f"Using scan model {scan_model}", '', '', 0.0, 0.7)
-        for finding in vuln_findings:
-            db.add_finding(target, 'scan', 'high', finding.get('title', 'Vulnerability'),
-                          finding.get('description', ''), finding.get('evidence', ''),
-                          f"Sanitize inputs for {finding.get('payload', '')}",
-                          8.5, 0.9)
+        console.print(f"[green]Scan phase returned {len(vuln_findings)} validated finding(s).[/green]")
 
         vuln_phase = fusion_engine.run_parallel_phase('vuln', f"Generate vulnerability scan strategy for {target}")
         console.print(f"[green]Fused vuln output ({vuln_phase['confidence']:.2f}):[/green] {vuln_phase['fused_output'][:200]}...")
