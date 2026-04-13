@@ -835,7 +835,7 @@ class VulnerabilityEngine:
     ]
 
     CMD_INDICATORS = [
-        'uid=', 'gid=', '/bin/', 'root', 'home/', 'bash', 'sh: command', 'command not found'
+        'uid=', 'gid=', '/bin/', 'home/', 'bash', 'sh: command', 'command not found'
     ]
 
     XXE_INDICATORS = ['root:', '/etc/passwd', 'file:///etc/passwd', 'external entity', 'entity expansion']
@@ -844,6 +844,25 @@ class VulnerabilityEngine:
     def scan_web(self, target: str) -> List[Dict]:
         """Full web vulnerability scan with validation and WAF detection."""
         findings = []
+        original_target = target
+        is_fragmented = self._is_fragment_target(target)
+        if is_fragmented:
+            clean_target = self._strip_fragment(target)
+            db.add_finding(
+                original_target,
+                'scan',
+                'info',
+                'Client-side fragment target detected',
+                'The provided target includes a URL fragment (#). Client-side anchors are not sent to the server and cannot be reliably tested with server-side payload injection.',
+                clean_target,
+                'Use a direct server endpoint URL instead of a browser-only fragment when testing for vulnerabilities.',
+                0.0,
+                0.5
+            )
+            return findings
+
+        target = self._strip_fragment(target)
+
         baseline = self._get_baseline_response(target)
         params = self._extract_params(target)
         waf_hits = []
@@ -907,6 +926,15 @@ class VulnerabilityEngine:
     def _extract_params(self, url: str) -> bool:
         return '?' in url
 
+    def _is_fragment_target(self, url: str) -> bool:
+        return bool(urlparse(url).fragment)
+
+    def _strip_fragment(self, url: str) -> str:
+        parsed = urlparse(url)
+        if parsed.fragment:
+            return parsed._replace(fragment='').geturl()
+        return url
+
     def _get_baseline_response(self, target: str) -> Dict[str, Any]:
         try:
             baseline_url = target if target.startswith('http') else f"http://{target}"
@@ -952,12 +980,12 @@ class VulnerabilityEngine:
                 if any(err in normalized for err in self.SQL_ERROR_INDICATORS):
                     confirmed = True
                     proof = next(err for err in self.SQL_ERROR_INDICATORS if err in normalized)
-                elif payload.lower() in normalized and 'sql' in normalized:
+                elif payload.lower() in normalized and any(term in normalized for term in ['sql', 'database', 'syntax', 'error']):
                     confirmed = True
-                    proof = 'Payload reflected with SQL error hints.'
-                elif resp.status_code == 500 and normalized != baseline.get('body', ''):
-                    proof = 'Server error response differs from baseline.'
+                    proof = 'Payload reflected with SQL-related text in response.'
+                elif resp.status_code == 500 and baseline.get('status') and baseline['status'] < 400 and normalized != baseline.get('body', ''):
                     confirmed = True
+                    proof = 'Server error response changed from baseline after injection payload.'
                 title = 'SQL Injection confirmed' if confirmed else 'SQL Injection candidate'
 
             elif vuln_type == 'xss':
@@ -969,9 +997,15 @@ class VulnerabilityEngine:
 
             elif vuln_type == 'cmd_inj':
                 owasp = 'A05:2021'
-                if any(ind in normalized for ind in self.CMD_INDICATORS):
+                if any(ind in normalized for ind in ['uid=', 'gid=', '/bin/', 'bash', 'sh: command', 'command not found']):
                     confirmed = True
-                    proof = next(ind for ind in self.CMD_INDICATORS if ind in normalized)
+                    proof = next(ind for ind in ['uid=', 'gid=', '/bin/', 'bash', 'sh: command', 'command not found'] if ind in normalized)
+                elif 'root' in normalized and any(ind in normalized for ind in ['uid=', 'gid=', '/bin/']):
+                    confirmed = True
+                    proof = 'Root-level system output combined with shell content.'
+                else:
+                    if 'root' in normalized:
+                        proof = 'root found in response; not enough to confirm command injection without shell-specific indicators.'
                 title = 'Command injection confirmed' if confirmed else 'Command injection candidate'
 
             elif vuln_type == 'ssrf':
@@ -988,9 +1022,9 @@ class VulnerabilityEngine:
                     proof = next(ind for ind in self.XXE_INDICATORS if ind in normalized)
                 title = 'XXE confirmed' if confirmed else 'XXE candidate'
 
-            severity = 'high' if confirmed else 'medium'
+            severity = 'high' if confirmed else 'low'
             cvss = self._score_cvss(vuln_type, confirmed)
-            confidence = 0.9 if confirmed else 0.5
+            confidence = 0.9 if confirmed else 0.35
 
             if confirmed:
                 description = (
@@ -1117,10 +1151,15 @@ class ReportEngine:
             seen.add(key)
             unique_findings.append(finding)
 
+        confirmed_findings = [f for f in unique_findings if 'candidate' not in f.get('title', '').lower() and f.get('severity') in ['high', 'medium']]
+        candidate_findings = [f for f in unique_findings if 'candidate' in f.get('title', '').lower()]
+
         if not unique_findings:
-            summary_html = '<p>No confirmed vulnerabilities were validated. Review WAF detection and manual verification results.</p>'
+            summary_html = '<p>No findings were validated. Review WAF detection and perform manual verification before reporting.</p>'
         else:
-            summary_html = f'<p>Total confirmed findings: {len(unique_findings)}</p>'
+            summary_html = f'<p>Total findings: {len(unique_findings)}. Confirmed: {len(confirmed_findings)}; Candidates/manual verification required: {len(candidate_findings)}.</p>'
+            if candidate_findings:
+                summary_html += '<p><strong>Note:</strong> Candidate findings require manual validation and proof before treating them as confirmed vulnerabilities.</p>'
 
         findings_html = ''
         for f in unique_findings:
