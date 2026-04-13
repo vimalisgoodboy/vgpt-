@@ -163,9 +163,24 @@ agent_system = MultiAgentSystem()
 class ModelManager:
     MODELS = ['llama3', 'mistral', 'codellama']
 
+    PHASE_MODEL_PREFERENCE = {
+        'pipeline': ['dolphin-llama3:8b', 'llama3.1:8b', 'qwen2.5:7b', 'wizardlm2:7b', 'phi3:14b', 'llama3.2:3b'],
+        'recon': ['llama3.2:3b', 'qwen2.5:7b', 'gemma2:2b', 'phi3:mini', 'dolphin-llama3:8b'],
+        'intelligence': ['wizardlm2:7b', 'phi3:14b', 'qwen2.5:7b', 'llama3.1:8b'],
+        'scan': ['codellama:7b', 'deepseek-coder:6.7b', 'qwen2.5:7b', 'llama3.1:8b'],
+        'analysis': ['phi3:14b', 'llama3.1:8b', 'wizardlm2:7b', 'deepseek-coder:6.7b'],
+        'validation': ['llama3.1:8b', 'qwen2.5-coder:7b', 'deepseek-coder:6.7b'],
+        'prioritize': ['llama3.1:8b', 'wizardlm2:7b', 'qwen2.5-coder:7b'],
+        'report': ['llama3.1:8b', 'wizardlm2:7b', 'phi3:14b'],
+        'exploit': ['dolphin-llama3:8b', 'wizardlm2:7b', 'qwen2.5-coder:7b', 'codellama:7b', 'deepseek-coder:6.7b'],
+        'privesc': ['dolphin-llama3:8b', 'deepseek-coder:6.7b', 'codellama:7b', 'qwen2.5-coder:7b'],
+        'osint': ['wizardlm2:7b', 'qwen2.5:7b', 'llama3.2:3b']
+    }
+
     def __init__(self):
         self.active_models = list(self.MODELS)
         self.ollama_models = self._discover_ollama_models()
+        self.available_models = self.ollama_models
 
     def _discover_ollama_models(self) -> List[str]:
         if not shutil.which('ollama'):
@@ -182,15 +197,31 @@ class ModelManager:
     def select_model(self, mode: str, domain: Optional[str] = None) -> str:
         if self.ollama_models:
             domain_key = (domain or mode or '').lower()
-            if any(k in domain_key for k in ['recon', 'intel', 'osint', 'search']):
-                candidates = [m for m in self.ollama_models if any(x in m.lower() for x in ['recon', 'search', 'intel', 'osint', 'mistral', 'qwen'])]
-            elif any(k in domain_key for k in ['scan', 'analysis', 'validation', 'audit']):
-                candidates = [m for m in self.ollama_models if any(x in m.lower() for x in ['scan', 'analysis', 'audit', 'security', 'sec', 'codellama', 'deepseek'])]
-            elif any(k in domain_key for k in ['exploit', 'prioritize', 'report', 'learn', 'code', 'privesc']):
-                candidates = [m for m in self.ollama_models if any(x in m.lower() for x in ['code', 'dev', 'exploit', 'gpt', 'infer', 'codellama', 'qwen', 'deepseek'])]
+            candidates = []
+            for phase, preferred_models in self.PHASE_MODEL_PREFERENCE.items():
+                if phase == domain_key or phase in domain_key or domain_key in phase:
+                    candidates = preferred_models
+                    break
+
+            if not candidates:
+                candidates = self.PHASE_MODEL_PREFERENCE.get(domain_key) or self.PHASE_MODEL_PREFERENCE.get(mode) or []
+
+            selected = next((m for m in candidates if m in self.ollama_models), None)
+            if selected:
+                return selected
+
+            # Fallback to keyword-driven selection from available models
+            if 'exploit' in domain_key or 'privesc' in domain_key or 'code' in domain_key:
+                fallback_keys = ['dolphin-llama3', 'qwen2.5-coder', 'codellama', 'deepseek-coder', 'wizardlm2']
+            elif 'scan' in domain_key or 'analysis' in domain_key or 'validation' in domain_key or 'audit' in domain_key:
+                fallback_keys = ['codellama', 'deepseek-coder', 'phi3', 'qwen2.5', 'llama3.1']
+            elif 'recon' in domain_key or 'intel' in domain_key or 'osint' in domain_key or 'search' in domain_key:
+                fallback_keys = ['llama3.2', 'qwen2.5', 'gemma2', 'phi3', 'wizardlm2']
             else:
-                candidates = self.ollama_models
-            return candidates[0] if candidates else self.ollama_models[0]
+                fallback_keys = []
+
+            selected = next((m for m in self.ollama_models if any(key in m for key in fallback_keys)), None)
+            return selected or self.ollama_models[0]
 
         if mode in ['aggressive', 'fast']:
             return 'codellama'
@@ -206,11 +237,11 @@ class ModelManager:
 
 class OllamaFusion:
     PHASE_MODELS = {
-        'recon': ['llama3.2:3b', 'qwen2.5:1.5b', 'codellama:7b', 'phi3:mini', 'gemma2:2b'],
-        'vuln': ['codellama:7b', 'deepseek-coder:6.7b', 'qwen2.5-coder:3b', 'llama3.2:3b', 'codegemma:7b', 'starcoder2:3b'],
-        'exploit': ['qwen2.5-coder:7b', 'codellama:13b', 'deepseek-coder:6.7b', 'codegemma:7b', 'starcoder2:7b', 'llama3.1:8b', 'phi3:medium'],
-        'privesc': ['deepseek-coder:6.7b', 'llama3.2:3b', 'codellama:7b', 'qwen2.5-coder:3b', 'gemma2:9b'],
-        'report': ['llama3.1:8b', 'llama3.2:3b', 'gemma2:9b', 'phi3:mini', 'qwen2.5-coder:7b']
+        'recon': ['llama3.2:3b', 'qwen2.5:7b', 'gemma2:2b', 'phi3:mini', 'dolphin-llama3:8b'],
+        'vuln': ['codellama:7b', 'deepseek-coder:6.7b', 'qwen2.5:7b', 'llama3.1:8b'],
+        'exploit': ['dolphin-llama3:8b', 'wizardlm2:7b', 'qwen2.5-coder:7b', 'codellama:7b', 'deepseek-coder:6.7b'],
+        'privesc': ['dolphin-llama3:8b', 'deepseek-coder:6.7b', 'codellama:7b', 'qwen2.5-coder:7b'],
+        'report': ['llama3.1:8b', 'wizardlm2:7b', 'phi3:14b', 'llama3.2:3b']
     }
 
     def __init__(self):
